@@ -1,0 +1,41 @@
+# Bundle patch for dsh-custom-search.
+#
+# Switching the search backend is one config value, not a plugin swap: the `web`
+# seam (`@deepseek-ai/dsh-web`) owns provider selection and resolves it by id.
+#
+# Remember: a patch replaces the targeted row's WHOLE `config`, it does not merge
+# into it. That is why the `web` row below restates `fetchProvider`.
+
+- insert:
+    # The provider row. Its `config` is the surface the Settings form edits, so
+    # every field of the plugin's Config schema appears here with its default.
+    - id: custom-search
+      name: dsh-custom-search
+      config:
+        engine: searxng
+        fallback: ''
+        endpoint: ''
+        endpoints: ''
+        apiKeyEnv: ''
+        googleCx: ''
+        searchDepth: basic
+        maxResults: 8
+        timeoutMs: 20000
+        language: zh-CN
+        safeSearch: moderate
+
+    # Point the seam at this provider.
+    # `fetchProvider: http` must stay: dropping it leaves web_fetch with no backend.
+    - id: web
+      name: '@deepseek-ai/dsh-web'
+      config:
+        searchProvider: custom-search
+        fetchProvider: http
+
+    # Switch the official backend off so exactly one search provider is usable.
+    # Without this, clearing `searchProvider` above would resolve to
+    # WEB_PROVIDER_AMBIGUOUS instead of falling back to this plugin.
+    # Set `disabled: false` to keep DeepSeek native search mounted alongside.
+    - id: web-search-deepseek
+      name: '@deepseek-ai/dsh-web-search-deepseek'
+      disabled: true

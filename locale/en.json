@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Custom search engine",
+    "description": "Swap the official DeepSeek web search for a configurable engine (SearXNG / Tavily / Exa / Brave / Serper / Bing / Google) while web_search keeps its name and schema."
+  }
+}
