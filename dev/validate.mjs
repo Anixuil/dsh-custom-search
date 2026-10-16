@@ -250,26 +250,175 @@ assert.equal(
 )
 ok(`factory id 与包名一致（${factoryId[2]}）`)
 
-const slotName = clientSrc.match(/slots\.inject\(\s*'([^']+)'/)
-assert.equal(slotName?.[1], 'plugins.row.config', '页面必须注册进 plugins.row.config，行上才会出现「配置」控件')
-ok('注册进 plugins.row.config')
+const clientConst = (name) => {
+  const match = clientSrc.match(new RegExp(`\\b${name}\\s*=\\s*'([^']+)'`, 'u'))
+  assert.ok(match, `client.js 必须声明 ${name}`)
+  return match[1]
+}
 
-const rowKeyConst = clientSrc.match(/ROW_KEY\s*=\s*'([^']+)'/)
-assert.ok(rowKeyConst, 'client.js 必须声明 ROW_KEY')
+// The page offers two entry points and both are needed: `plugins.item` is the
+// card that opens this plugin's own page (the shape the official settings pages
+// use, and the only one reachable without opening the bundle first), while
+// `plugins.row.config` is the 配置 control the page puts on a row — and only
+// when a registration exists for `<package name>#<row id>`.
+assert.equal(clientConst('ITEM_SLOT'), 'plugins.item', 'ITEM_SLOT 必须是插件页的卡片槽')
+assert.equal(clientConst('ROW_SLOT'), 'plugins.row.config', 'ROW_SLOT 必须是行的配置槽')
+ok(`两个入口的槽位正确（${clientConst('ITEM_SLOT')} + ${clientConst('ROW_SLOT')}）`)
+
+const rowKey = clientConst('ROW_KEY')
 assert.equal(
-  rowKeyConst[1],
+  rowKey,
   `${pkg.name}#${pluginRow.id}`,
-  `slot key 必须是 <包名>#<行 id>，即 ${pkg.name}#${pluginRow.id}`,
+  `row 槽的 key 必须是 <包名>#<行 id>，即 ${pkg.name}#${pluginRow.id}`,
 )
-ok(`slot key 与包名 + 行 id 一致（${rowKeyConst[1]}）`)
+ok(`row 槽 key 与包名 + 行 id 一致（${rowKey}）`)
 
-const rowIdConst = clientSrc.match(/ROW_ID\s*=\s*'([^']+)'/)
-assert.ok(rowIdConst, 'client.js 必须声明 ROW_ID')
-assert.equal(rowIdConst[1], pluginRow.id, `configForms 用的命名空间是行 id，必须等于 patch 行 id「${pluginRow.id}」`)
-ok(`configForms 命名空间与 patch 行 id 一致（${rowIdConst[1]}）`)
+const rowId = clientConst('ROW_ID')
+assert.equal(rowId, pluginRow.id, `configForms 用的命名空间是行 id，必须等于 patch 行 id「${pluginRow.id}」`)
+ok(`configForms 命名空间与 patch 行 id 一致（${rowId}）`)
 
-assert.ok(/whileServed\(\s*\[\s*ROW_ID\s*\]/u.test(clientSrc), '页面应经 configForms.whileServed 跟随 Host 提供的命名空间')
-ok('页面经 configForms.whileServed 跟随命名空间')
+assert.ok(
+  /whileServed\(\s*\[\s*ROW_ID\s*\]/u.test(clientSrc),
+  '挂载应经 configForms.whileServed 跟随 Host 提供的命名空间',
+)
+// Anchored to a line of its own so the `mount` DECLARATION (which begins with
+// `function`) is not counted as one of its own call sites.
+const mounts = [...clientSrc.matchAll(/^[ \t]+mount\(\s*ctx,\s*card,\s*(\w+)/gmu)].map((match) => match[1])
+assert.deepEqual(mounts, ['ITEM_SLOT', 'ROW_SLOT'], '两个入口都必须挂载，缺一个就少一个配置入口')
+ok(`两个入口都经 configForms.whileServed 挂载（${mounts.join(' + ')}）`)
+
+// --- browser half: actually run it ----------------------------------------
+// The checks above read the source's shape. These RUN it: the factory is
+// materialized with a stub `require`, `apply(ctx)` is driven against a fake
+// context, and the registrations it makes are inspected. A throw anywhere in
+// here is exactly what makes the page silently absent in the browser, where
+// `dsh-client-modules` records the failure and mounts nothing at all.
+const makeStore = () => {
+  let value = null
+  return { getSnapshot: () => value, set: (next) => { value = next }, subscribe: () => () => {} }
+}
+const uiStub = {
+  settingsTextField: (name) => ({ kind: 'text', name }),
+  settingsNumberField: (name) => ({ kind: 'number', name }),
+  SettingsFormModel: class {
+    constructor(scope, specs, secrets) {
+      this.scope = scope
+      this.specs = specs
+      this.secrets = secrets
+    }
+    shell() {
+      return { available: true, writable: true, dirty: false, invalid: false, saving: false, failed: false }
+    }
+    field() {
+      return { text: '', overridden: false, invalid: false }
+    }
+    bind(project) {
+      const store = makeStore()
+      store.set(project())
+      return store
+    }
+    actions() {
+      return { save: () => {}, discard: () => {}, edit: () => {}, resetField: () => {} }
+    }
+    dispose() {}
+  },
+  SettingsForm: (props) => props,
+  SettingsValueField: (props) => props,
+  SettingsSecretField: (props) => props,
+  Pill: (props) => props,
+}
+
+const scopeStub = {
+  value: { engine: 'brave', apiKeyEnv: '' },
+  subscribe: () => () => {},
+  getSnapshot() {
+    return this.value
+  },
+}
+
+const registrations = []
+const fakeCtx = {
+  locale: { bind: () => (key) => key, register: () => () => {} },
+  effect: (run) => run(),
+  configForms: {
+    get: () => scopeStub,
+    whileServed: (_namespaces, register) => register(new Set([rowId])),
+  },
+  slots: {
+    inject: (_name, register) => register(),
+    register: (options, component) => {
+      registrations.push({ options, component })
+      return () => {}
+    },
+  },
+  remote: {
+    credentials: {
+      describe: async () => ({ ok: true, value: {} }),
+      set: async () => ({ ok: true }),
+    },
+  },
+}
+
+let loaded
+vm.runInContext(clientSrc, vm.createContext({
+  window: { __ModuleLoader__: { load: (request) => { loaded = request } } },
+  console,
+}), { filename: 'client.js' })
+assert.ok(loaded, 'client.js 必须调用 window.__ModuleLoader__.load')
+assert.equal(loaded.id, pkg.name)
+
+const mod = loaded.factory((spec) => {
+  if (spec === 'react') return { createElement: () => null, Fragment: 'Fragment' }
+  if (spec === '@deepseek-ai/dsh-client-ui-primitives') return uiStub
+  throw new Error(`client.js require("${spec}") 未被 stub 覆盖`)
+})
+mod.apply(fakeCtx)
+ok('client.js 的 apply(ctx) 能在 stub 上下文里跑完')
+
+assert.equal(registrations.length, 2, `apply 应给两个槽各注册一次，实际 ${registrations.length} 次`)
+const forSlot = (name) => registrations.filter((entry) => entry.options.name === name)
+const itemReg = forSlot('plugins.item')
+const rowReg = forSlot('plugins.row.config')
+assert.equal(itemReg.length, 1, 'plugins.item 应注册恰好一次')
+assert.equal(rowReg.length, 1, 'plugins.row.config 应注册恰好一次')
+
+// The card is a LIST slot, so it is addressed by `id`; the row config is a
+// KEYED slot, so it is addressed by `key`.
+assert.equal(itemReg[0].options.id, clientConst('ITEM_ID'), 'plugins.item 必须带 id 寻址')
+assert.equal(rowReg[0].options.key, rowKey, 'plugins.row.config 必须带 key 寻址')
+
+// The card's id doubles as its artwork key, and the official cards already own
+// four ids. Reusing one would leave two cards answering the same `only: id`.
+const RESERVED_ITEM_IDS = ['shell', 'agent-loop', 'subagent', 'web-search']
+assert.ok(
+  !RESERVED_ITEM_IDS.includes(clientConst('ITEM_ID')),
+  `卡片 id「${clientConst('ITEM_ID')}」被官方卡片占用：${RESERVED_ITEM_IDS.join(' / ')}`,
+)
+
+// The card needs a title, and it must be read through the dictionary so it
+// follows the active locale.
+assert.equal(typeof itemReg[0].options.label, 'function', 'plugins.item 必须带 label')
+assert.equal(itemReg[0].options.label(), 'title', 'label 应读词典的 title')
+assert.equal(itemReg[0].options.locale, clientConst('NS'), '注册应带本页的词典命名空间')
+
+// One form, both entry points.
+assert.equal(itemReg[0].component, rowReg[0].component, '两个入口必须渲染同一个组件')
+
+// The injected face names the store under `hooks.<key>`, and the page exposes
+// it to the component as `props.use<Key>`; a mismatch is silent. Reading the
+// prop name back out of the source is what makes this checkable.
+const face = itemReg[0].options.inject()
+const hookKey = Object.keys(face.hooks ?? {})[0]
+assert.ok(hookKey, 'inject() 必须暴露一个 hooks.<key> 供组件读取')
+const propName = `use${hookKey.charAt(0).toUpperCase()}${hookKey.slice(1)}`
+assert.ok(
+  new RegExp(`props\\.${propName}\\s*\\(`, 'u').test(clientSrc),
+  `组件必须用 props.${propName}() 读注入的 store，否则表单永远读不到状态`,
+)
+for (const action of ['save', 'discard', 'edit', 'resetField']) {
+  assert.equal(typeof face[action], 'function', `inject() 必须暴露 ${action}，组件把它当作 props.${action}`)
+}
+ok(`两个入口共用一份表单（props.${propName} + save/discard/edit/resetField）`)
 
 const clientInject = clientDecl.inject ?? []
 for (const dep of ['@deepseek-ai/dsh-client-ui-settings', '@deepseek-ai/dsh-client-ui-plugin-manager']) {

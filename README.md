@@ -103,9 +103,16 @@ provider 契约（`ctx.web.registerSearchProvider` 与返回结构）是照着
 
 ## 配置
 
-**在插件页改**（推荐）。侧栏「插件」→ 点开 `dsh-custom-search` 这个组合包 →
-组件行 `custom-search`（自定义搜索引擎）右侧点**配置**。表单里 12 个字段全在，
-引擎还能用一排胶囊一键切换。点**保存**即写入 profile 的 patch 层并由 Loader 应用，不用重启。
+**在插件页改**（推荐）。侧栏「插件」，有两个入口，进去是同一张表单：
+
+- **「官方」区块里的「自定义搜索引擎」卡片** —— 点开就是配置页，最直接。
+- 或者点开 `dsh-custom-search` 组合包 → 组件行 `custom-search` 右侧的**配置**按钮。
+
+表单里 12 个字段全在，引擎还能用一排胶囊一键切换。点**保存**即写入 profile 的 patch 层并由
+Loader 应用，不用重启。
+
+> **装完要重启一次 Harness**，卡片才会出现。浏览器半侧是前端启动时加载的模块：
+> 安装是在前端启动之后才落地的，热重载不会把它补进来。
 
 **API Key 不进设置文件**：它经凭证服务写入，引用名默认取该引擎约定的环境变量名
 （Brave 是 `BRAVE_API_KEY`），落点是 `~/.dsh/.credentials.yaml` 的 `refs:` 段——和模型 provider 的
@@ -128,9 +135,18 @@ provider 契约（`ctx.web.registerSearchProvider` 与返回结构）是照着
 
 > **为什么配置页要插件自带？** DSH 的插件页只渲染**插件自己注册了配置页**的插件——
 > 官方那四个配置页（shell 执行器、agent loop、子智能体、DeepSeek 搜索提供方）
-> **各来自一个伴生包**，设置里的「插件」分区只是**只读**清单。本插件把这一半放在 `client.js`：
-> 通过 `ctx.slots.inject('plugins.row.config', …)` 注册，键是 `<包名>#<行 id>`。
-> 没有它，这一行就只有启停开关——这正是本插件 0.1.0 的状态。
+> **各来自一个伴生包**，设置里的「插件」分区只是**只读**清单。
+>
+> 本插件把这一半放在 `client.js`，两个入口都注册（官方只用前者）：
+>
+> | 槽位 | 寻址字段 | 渲染成 |
+> |---|---|---|
+> | `plugins.item` | `id`（list 槽） | 插件页上一张能直接点开的卡片，带独立页面 |
+> | `plugins.row.config` | `key` = `<包名>#<行 id>`（keyed 槽） | 行详情里的配置表单 |
+>
+> 两者都只在宿主**在服务** `custom-search` 这个设置命名空间时才挂载
+> （`configForms.whileServed`），所以没装/没启用的部署上看不到任何痕迹。
+> 没有它们，这一行就只有启停开关——这正是本插件 0.1.0 的状态。
 
 ### 字段
 
@@ -332,7 +348,7 @@ dsh-custom-search/
 ├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
     ├── smoke.mjs        13 项：provider 契约、归一化、去重、兜底、取消、错误码
-    ├── validate.mjs     31 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、浏览器半侧契约
+    ├── validate.mjs     33 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、浏览器半侧的契约与实跑
     ├── bundle-rows.mjs  对着任一份 patch 复现卸载判据（bundle-in-use），非本包的行会标出来
     └── asar.py          从 DSH 安装包里抽源码/依赖的解析脚本
 ```
@@ -365,9 +381,14 @@ node validate.mjs   # 清单、patch 方言、patch 与 Config 对齐，以及�
 node bundle-rows.mjs <某份 cordis.patch.yml>   # 复现宿主的卸载判据，定位「卸不掉」
 ```
 
-`validate.mjs` 里浏览器半侧那几项值得一提：factory id、`plugins.row.config` 的 key、
-`configForms` 用的命名空间、以及每个 `require` 是否命中平台模块表。
-**这些全都只会静默失败**——写错一个字符，插件行就只剩启停开关，没有任何报错。
+`validate.mjs` 里浏览器半侧那段最值得一提：它**真的把 `client.js` 跑了一遍**——在 `vm` 里
+用 stub 的 `require` 物化工厂，再拿一份假 `ctx` 调 `apply(ctx)`，然后检查它到底注册了什么。
+断言覆盖两个槽位各自的寻址字段（`plugins.item` 用 `id`、`plugins.row.config` 用 `key`）、
+卡片 id 不与官方占用的四个撞车、两个入口共用同一份表单，以及注入的 `hooks.<key>`
+与组件读取的 `props.use<Key>()` 拼写一致。**这些全都只会静默失败**——写错一个字符，
+插件行就只剩启停开关，界面上没有任何报错。
+
+（把它写成实跑而不是正则断言，是因为"注册到底发生了没有"这件事，只有跑一遍才答得准。）
 
 行归属那几项同理：脚本会照 `applyEntryPatches` 的语义把各层合成一遍，断言
 `insert:` 里只有本包自己的行、合成后 `web` / `web-search-deepseek` 各只有一份。

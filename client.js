@@ -3,10 +3,17 @@
  *
  * DSH does not derive a plugin's settings page from its `Config` schema. The
  * Plugins page renders a config page only for plugins whose own browser half
- * registers one, through `ctx.slots.inject()`. This module registers one for
- * the `custom-search` row under `plugins.row.config`, which is what puts a
- * 配置 control on that row; without it the row has nothing but a toggle and the
- * plugin cannot be configured from the GUI at all.
+ * registers one, through `ctx.slots.inject()`. Without this module the row has
+ * nothing but a toggle and the plugin cannot be configured from the GUI at all.
+ *
+ * The page offers two entry points, and both are registered here:
+ *
+ * - `plugins.item` — a card of this plugin's own on the Plugins page, opening a
+ *   page with the form. This is the shape the official settings pages use, and
+ *   the only one reachable without opening the bundle first.
+ * - `plugins.row.config` — the same form behind the 配置 control on this
+ *   plugin's own row, which the page offers when (and only when) a registration
+ *   exists for `<package name>#<row id>`.
  *
  * Shape expected by `@deepseek-ai/dsh-client-modules`: executing this file only
  * REGISTERS a factory; the module body runs when it is first materialized. `id`
@@ -39,6 +46,23 @@ window.__ModuleLoader__.load({
      * because this package must not import its own manifest at runtime.
      */
     const ROW_KEY = 'dsh-custom-search#custom-search'
+
+    /** The card of this plugin's own on the Plugins page. */
+    const ITEM_SLOT = 'plugins.item'
+
+    /** The 配置 control on this plugin's own row. */
+    const ROW_SLOT = 'plugins.row.config'
+
+    /**
+     * Registration id of the card above. The page also keys card artwork by
+     * this id: unknown ids fall back to the default artwork, while `shell`,
+     * `agent-loop`, `subagent` and `web-search` are taken by the official
+     * cards, so this must stay distinct from all four.
+     */
+    const ITEM_ID = 'custom-search'
+
+    /** Where the card sorts among the other cards of the page. */
+    const ITEM_ORDER = 45
 
     /** Dictionary namespace owned by this plugin. */
     const NS = 'settings.customSearch'
@@ -438,8 +462,34 @@ window.__ModuleLoader__.load({
     const inject = ['slots', 'locale', 'configForms', 'remote', 'remote.credentials']
 
     /**
-     * Mount this row's config page while the Host serves its namespace, so a
-     * deployment that never composed the provider shows no trace of the page.
+     * Mount the page on one slot of the Plugins page, and take it down again
+     * when the Host stops serving the row's settings namespace, so a
+     * deployment that never composed the provider shows no trace of it.
+     * @param ctx - the browser plugin context.
+     * @param card - the form the registration injects.
+     * @param slot - the slot to register into.
+     * @param options - the addressing options that slot requires.
+     * @param effect - the label this registration is reported under.
+     */
+    function mount(ctx, card, slot, options, effect) {
+      ctx.effect(
+        () =>
+          ctx.configForms.whileServed([ROW_ID], () =>
+            ctx.slots.inject(slot, () =>
+              ctx.slots.register(
+                { name: slot, locale: NS, inject: () => card.inject(), ...options },
+                CustomSearchCard,
+              ),
+            ),
+          ),
+        effect,
+      )
+    }
+
+    /**
+     * Mount this plugin's page on both of the Plugins page's entry points. The
+     * two share one form controller, so a draft staged from either is the same
+     * draft.
      * @param ctx - the browser plugin context.
      */
     function apply(ctx) {
@@ -454,28 +504,22 @@ window.__ModuleLoader__.load({
         'dsh-custom-search: form subscription',
       )
 
-      ctx.effect(
-        () =>
-          ctx.configForms.whileServed([ROW_ID], () =>
-            ctx.slots.inject('plugins.row.config', () =>
-              ctx.slots.register(
-                {
-                  name: 'plugins.row.config',
-                  key: ROW_KEY,
-                  locale: NS,
-                  inject: () => card.inject(),
-                },
-                CustomSearchCard,
-              ),
-            ),
-          ),
-        'dsh-custom-search: page',
+      mount(
+        ctx,
+        card,
+        ITEM_SLOT,
+        { id: ITEM_ID, order: ITEM_ORDER, label: () => t('title') },
+        'dsh-custom-search: card',
       )
+      mount(ctx, card, ROW_SLOT, { key: ROW_KEY }, 'dsh-custom-search: row config')
     }
 
     exports.NS = NS
     exports.ROW_ID = ROW_ID
     exports.ROW_KEY = ROW_KEY
+    exports.ITEM_SLOT = ITEM_SLOT
+    exports.ROW_SLOT = ROW_SLOT
+    exports.ITEM_ID = ITEM_ID
     exports.apply = apply
     exports.inject = inject
     return module.exports
