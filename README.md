@@ -8,6 +8,9 @@
 用你自己的搜索源替换 DSH 内置的「仅官方 DeepSeek」搜索。`web_search` 工具名与参数保持不变，
 换的只是背后的检索通道——所以模型的提示词、工具表、Agent 预设都不用动。
 
+> **第三方社区插件。** 本项目与 DeepSeek 官方无隶属关系，也不属于官方插件市场。
+> 下文「官方搜索」「官方提供方」一律指 DSH 自带的 `@deepseek-ai/dsh-web-search-deepseek`。
+
 ---
 
 ## 它替换的到底是什么
@@ -29,27 +32,38 @@ DSH 把「联网搜索」拆成了三层，本插件只接管最底下那层：
 
 ## 安装
 
-先在 DeepSeek Harness 桌面端里确认当前 profile（本机为 `desktop`），然后三选一：
-
-**A. 桌面端面板**（对应截图里的「+ 添加插件」）
-填本地目录的绝对路径，例如 `D:\code\self\all\dsh-custom-search`。
-
-**B. 命令行**
+**从 GitHub 安装**（推荐）
 
 ```bash
-dsh plugin --profile desktop add D:\code\self\all\dsh-custom-search
+dsh plugin --profile desktop add github:Anixuil/dsh-custom-search#main
 ```
 
-**C. 从 GitHub 安装**（发布后）
+**从本地目录安装**（开发调试，改完重启即生效）
 
 ```bash
-dsh plugin --profile desktop add github:<owner>/dsh-custom-search#main
+dsh plugin --profile desktop add <本仓库的绝对路径>
 ```
+
+也可以走桌面端面板：在「+ 添加插件」里填本仓库的绝对路径或上面的 GitHub 地址。
 
 装完**重启 Harness** 才生效（bundle 类插件不会热加载）。桌面端用「重启 Harness」或退出重开。
 
-> 用 `github:` 源时 pnpm 会默认拦截构建脚本。本插件没有构建步骤，但若被拦下，
+> `desktop` 是 DeepSeek Harness 桌面端的 profile 名（数据目录 `~/.dsh/profiles/desktop`）。
+> 如果你用的是 CLI 或其他 profile，换成实际名称，例如
+> `dsh plugin --profile web add github:Anixuil/dsh-custom-search#main`。
+
+> 本插件没有构建步骤，`github:` 源可以直装。若 pnpm 仍拦下构建脚本，
 > 在 `$DSH_HOME/profiles/desktop/pnpm-workspace.yaml` 的 `allowBuilds` 里放行 `dsh-custom-search`。
+
+### 兼容性
+
+provider 契约（`ctx.web.registerSearchProvider` 与返回结构）是照着
+**`@deepseek-ai/dsh-*` 0.2.0-rc.2**（DeepSeek Harness Desktop 0.2.0-rc.2）的源码实现的，
+并对该版本做过离线契约验证。
+
+> DSH 仍在 developer preview：`apply(ctx)` 规范稳定，但 `ctx.web` 这类服务在预览版之间
+> 仍可能调整。升级 Harness 后若搜索报 `WEB_PROVIDER_*` 错误，先对照
+> `@deepseek-ai/dsh-web` 的 `registerSearchProvider` 签名和 `WebRuntime.Config` 字段。
 
 ## 配置
 
