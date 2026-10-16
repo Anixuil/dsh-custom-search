@@ -133,8 +133,19 @@ DSH 的解法是 `dsh-app-boot` 给 profile 装的一层**模块解析拦截**�
 `link:` 依赖，本来就在——所以本地目录安装改完 `package.json` 重启一次即可。
 只有 `github:` 源安装才需要卸载重装（它拉的是仓库快照，本地改什么都不影响它）。
 
+声明和导入对上了还不够：**声明的那一份得真的在安装包里**，否则路由过去同样
+`ERR_MODULE_NOT_FOUND`。这个只有当前安装包能回答，所以有 `dev/peer-closure.py`
+——它把安装包的依赖闭包从 `app.asar` 里按宿主的走法重算一遍（0.2.0-rc.2 上是 513 个包），
+再逐个核对本插件的 peer：
+
+```bash
+python dev/peer-closure.py          # 全部 5 个 peer 都能被当前安装包供给 ✓
+python dev/peer-closure.py --all    # 顺带列出作用域里所有 @deepseek-ai/*
+```
+
 （`node_modules/` 里那份 `@deepseek-ai/{cosmokit,schemastery}` 只是**离线跑 `dev/` 测试**用的，
-`.gitignore` 忽略、`files` 白名单排除；运行时由上面的拦截优先接管，越不过去。）
+`.gitignore` 忽略、`files` 白名单排除。声明了 peer 之后，运行时会优先走上面的拦截、取安装包
+那一份，所以不会出现"插件自己带了一份旧 schemastery"这种漂移。）
 
 ## 配置
 
@@ -189,9 +200,13 @@ Loader 应用，不用重启。
 
 表单里有未保存的改动时会另行提示——本地检查看的是你的输入，真实请求用的是已保存的配置。
 
-> **界面上没有这个按钮**，说明宿主没接受探针（例如部署里没挂 Typert 包），此时只剩本地检查。
-> 这是有意的降级：探针**永远不影响搜索本身**，最多就是少一个按钮。
-> 探针缺席的原因会打到宿主进程的控制台：`[dsh-custom-search] 连接探针未安装：…`。
+> **按钮下面那行说"只剩本地检查"时，它会点名原因。** 页面能看见自己的四种失败，所以四种各说各的：
+> `$mount` 不存在（这个 Harness 构建不对）、挂载被 Gateway 拒绝（把 **Gateway 的错误原文**带出来）、
+> 挂载成功但读不到命名空间（列出 `ctx.remote` 上实际有什么）、挂载了但没有这个方法。
+> 这句含糊话以前是**一句包打天下**，而且把责任推给宿主——宿主恰恰是页面看不见的那一方。
+> 宿主侧的原因另有去处：宿主进程控制台会打 `[dsh-custom-search] 连接探针未安装：…` 并点名缺哪个包。
+>
+> 这是有意的降级：探针**永远不影响搜索本身**，最坏情况是少一个按钮。
 
 ### 没有界面时：直接改 profile 的 patch 层
 
@@ -403,11 +418,11 @@ rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-custom-search
 
 - **「测试连接」的探测层可能缺席**。本地检查（字段合法性、凭证状态，不联网）永远可用；
   「真实请求」要经 Remote 调用到宿主，靠 Typert 的源模式发现，宿主没挂载那套包时只剩本地检查。
-  两条路都**不影响搜索本身**——最坏情况是少一个按钮。缺席原因见上文
-  「依赖：为什么 `peerDependencies` 是必需的」。
+  两条路都**不影响搜索本身**——最坏情况是少一个按钮。面板会说明是哪一种缺席（见上文
+  「测一下配好没有」），清单层面的原因见「依赖：为什么 `peerDependencies` 是必需的」。
 - 探针走的是 Typert 的**源模式兜底**（手写 descriptor + 原型标记），因为本包没有构建步骤、
   产不出 `dsh-typert-generator` 的那两份文件。这是 DSH 的内部机制，大版本升级后可能要跟着调；
-  调不动时的表现同样是按钮消失，而不是搜索坏掉。
+  调不动时的表现是面板点名说明，而不是搜索坏掉。
 - 明细里的端点是**去掉查询串**的 `scheme://host/path`：Google CSE 把 `key=` 拼在 URL 上，
   时限报错也会把整条 URL 写进消息，所以报告生成前统一脱敏（`engines.js` 的
   `publicEndpoint` / `redactUrls`，`smoke.mjs` 有对应断言）。
@@ -427,8 +442,8 @@ rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-custom-search
 ```
 dsh-custom-search/
 ├── index.js          宿主半侧：Config schema、provider 注册、凭证解析、兜底链、连通性探针
-├── client.js         浏览器半侧：插件页的配置表单（三个入口）与「测试连接」按钮
-├── engines.js        引擎适配表：每个引擎的 build（怎么发请求）+ parse（怎么读响应）
+├── client.js         浏览器半侧：插件页的配置表单（三个入口）、「测试连接」按钮与缺席诊断
+├── engines.js        引擎适配表：每个引擎的 build（怎么发请求）+ parse（怎么读响应）+ 脱敏
 ├── cordis.patch.yml  组合包 patch：1 行 insert（本插件的行）+ 2 条对既有行的覆盖
 ├── package.json      dsh.bundle.patch + dsh.client 声明、peerDependencies、icon、locale、files 白名单
 ├── locale/           面板显示用的中英文标题与描述
@@ -436,10 +451,11 @@ dsh-custom-search/
 ├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
     ├── smoke.mjs        18 项：provider 契约、归一化、去重、兜底、取消、错误码、探针报告与脱敏
-    ├── validate.mjs     53 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、peerDependencies 对账、浏览器半侧的契约与渲染、探针两端一致性
+    ├── validate.mjs     54 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、peerDependencies 对账、浏览器半侧的契约与渲染、探针两端一致性与缺席文案
     ├── degraded-probe.mjs  子进程跑的降级用例：没有 Typert 包时探针缺席但 provider 照常
     ├── stubs/           只在 dev 里顶替 @deepseek-ai/dsh-typert-protocol（含注册用的 resolve hook）
     ├── bundle-rows.mjs  对着任一份 patch 复现卸载判据（bundle-in-use），非本包的行会标出来
+    ├── peer-closure.py  用安装包的依赖闭包核对 peerDependencies 是否真的可供给
     └── asar.py          从 DSH 安装包里抽源码/依赖的解析脚本
 ```
 
@@ -469,6 +485,7 @@ cd dev
 node smoke.mjs      # 起本地 mock server，用 stub ctx.web 驱动真实插件模块（含探针报告与脱敏）
 node validate.mjs   # 清单、patch 方言、两端声明一致性，以及浏览器半侧的契约与渲染
 node bundle-rows.mjs <某份 cordis.patch.yml>   # 复现宿主的卸载判据，定位「卸不掉」
+python peer-closure.py   # 安装包到底供不供得起本插件声明的每个 peer（读 app.asar）
 ```
 
 `degraded-probe.mjs` 不用手动跑——`smoke.mjs` 会用子进程拉它起来（必须另起进程，
@@ -495,6 +512,11 @@ node bundle-rows.mjs <某份 cordis.patch.yml>   # 复现宿主的卸载判据�
 `key: {ref}` 这种半成品也照样"渲染成功"——那样的断言等于没写。同时它先把函数组件展开一遍
 拿到文本（`textOf`），再渲染一遍（`stageReport` 可重复调用），所以同一份报告会被走两次，
 次数多算一次就会当场露馅。
+
+**探针缺席的理由也照同一套断言。** 那四种成因各有各的句子，脚本逐个渲染、逐个比对模板，
+再断言**四句话互不相同**——所以"用一句含糊话糊过去"是过不了的。它还把
+`describeProbeAbsence` 会报的成因与 `ABSENCE_KEY_OF` 的句子**双向对账**：报了没句子的成因而
+渲染出裸键、或写了句子却没人用，两种都当场失败。
 
 **探针那几项是同类问题的另一面。** 测试按钮要经 Remote 调用才能碰到宿主，而这个包没有构建步骤，
 `@deepseek-ai/dsh-typert-generator` 本该产出的那两份声明只能手写；**写错命名空间不会报错**，

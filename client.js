@@ -223,6 +223,10 @@ window.__ModuleLoader__.load({
       testHint: '按当前配置发一次真实搜索，验证密钥和接口是否可用（消耗 1 次配额）。',
       probeDirty: '有未保存的修改：上面的检查看的是当前输入，真实请求用的是已保存的配置。',
       probeUnavailable: '宿主没有提供探针，只能做本地检查。',
+      probeNoMount: '这个 Harness 构建的 remote 上没有 $mount，页面无法挂载探针。',
+      probeRefused: '挂载探针被拒绝：{v}',
+      probeNotReadable: '探针已挂载，但读不到命名空间 {v}。',
+      probeMissingMethod: '探针已挂载，但没有 {v} 方法。',
       probeOk: '{v} 返回 {n} 条结果，用时 {ms} ms。',
       probeFail: '请求失败：{msg}',
       probeRequest: '{m} {url}',
@@ -293,6 +297,10 @@ window.__ModuleLoader__.load({
       testHint: 'Runs one real search with the current settings to prove the key and endpoint work (spends one quota unit).',
       probeDirty: 'Unsaved edits: the checks above read your input, but the real request uses the saved settings.',
       probeUnavailable: 'The Host exposed no probe, so only the local checks are available.',
+      probeNoMount: 'this Harness build has no $mount on remote, so the page cannot mount the probe.',
+      probeRefused: 'mounting the probe was refused: {v}',
+      probeNotReadable: 'the probe mounted, but namespace {v} is not readable.',
+      probeMissingMethod: 'the probe mounted, but it has no {v} method.',
       probeOk: '{v} returned {n} source(s) in {ms} ms.',
       probeFail: 'Request failed: {msg}',
       probeRequest: '{m} {url}',
@@ -519,17 +527,98 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The text of a caught value, which is not always an `Error`: a rejected
+     * `$mount` carries a `RemoteError` or a plain object on some carriers.
+     * @param error - whatever was thrown or rejected.
+     * @returns a one-line description safe to put on the page.
+     */
+    function describeFailure(error) {
+      if (error instanceof Error) return String(error.message)
+      if (error !== null && typeof error === 'object') {
+        const code = error.code
+        const message = error.message
+        if (typeof message === 'string' && message.length > 0) {
+          return typeof code === 'string' ? `${code}: ${message}` : message
+        }
+        try {
+          return JSON.stringify(error).slice(0, 300)
+        } catch {
+          return Object.prototype.toString.call(error)
+        }
+      }
+      return String(error)
+    }
+
+    /**
+     * What `ctx.remote` does expose, for the one failure where that list is the
+     * answer: a namespace that mounted somewhere the page does not look.
+     * @param ctx - the page plugin's context.
+     * @returns a comma-separated list, or a note about why there is none.
+     */
+    function remoteNamespaceHint(ctx) {
+      try {
+        const names = Object.keys(ctx.remote ?? {}).filter((name) => !name.startsWith('$'))
+        return names.length === 0 ? '（ctx.remote 上没有可枚举的命名空间）' : names.join(', ')
+      } catch {
+        return '（ctx.remote 不可枚举）'
+      }
+    }
+
+    /**
+     * Name which of the page-visible probe failures happened.
+     * @param state - the recorded mount outcome.
+     * @param probe - what `probeOf` found, if anything.
+     * @param ctx - the page plugin's context.
+     * @returns the `remote` field's `unavailable` branch, with its cause.
+     */
+    function describeProbeAbsence(state, probe, ctx) {
+      if (state.status === 'unsupported') return { status: 'unavailable', cause: 'unsupported' }
+      if (state.status === 'refused') {
+        return { status: 'unavailable', cause: 'refused', message: state.reason }
+      }
+      if (state.status === 'mounted') {
+        if (probe === undefined || probe === null) {
+          return {
+            status: 'unavailable',
+            cause: 'unreadable',
+            message: `${PROBE_NAMESPACE}（ctx.remote 上是：${remoteNamespaceHint(ctx)}）`,
+          }
+        }
+        return { status: 'unavailable', cause: 'missing-method', message: PROBE_METHOD }
+      }
+      return { status: 'unavailable', cause: 'pending' }
+    }
+
+    /**
+     * Why the probe is not callable, as far as the page can tell.
+     *
+     * Five different failures used to render as one sentence that blamed the
+     * Host, which is the one thing the page cannot see: it can see whether
+     * `remote.$mount` exists, and — because `$mount` rejects with the Gateway's
+     * own error — *why* a mount was refused. Recording that here is what turns
+     * "宿主没有提供探针" from a guess into a diagnosis.
+     *
+     * Statuses: `pending` (mount in flight), `unsupported` (no `$mount` on this
+     * build), `refused` (the Gateway rejected the contribution), `mounted`.
+     */
+    const probeState = { status: 'pending', reason: null }
+
+    /**
      * Mount the probe namespace, keeping the page working when the Host refuses
      * it. The mount is asynchronous — descriptors are validated before any
      * method becomes callable — so the panel treats a missing namespace as
-     * "local checks only" rather than an error.
+     * "local checks only" rather than an error. The refusal is kept, not
+     * swallowed: the panel reports which of the two happened.
      * @param ctx - the page plugin's context.
      */
     function mountProbe(ctx) {
       let dispose
       let disposed = false
 
-      if (typeof ctx.remote?.$mount !== 'function') return
+      if (typeof ctx.remote?.$mount !== 'function') {
+        probeState.status = 'unsupported'
+        return
+      }
 
       Promise.resolve()
         .then(() => ctx.remote.$mount(PROBE_CONTRIBUTION))
@@ -543,9 +632,14 @@ window.__ModuleLoader__.load({
             return
           }
           dispose = unmount
+          probeState.status = 'mounted'
+          probeState.reason = null
         })
-        .catch(() => {
-          /* the Host declined the contribution; local checks remain */
+        .catch((error) => {
+          probeState.status = 'refused'
+          probeState.reason = describeFailure(error)
+          // The Host's own error code is the whole diagnosis, so it is kept
+          // verbatim; `describeFailure` only guards against a non-Error throw.
         })
 
       ctx.effect(
@@ -687,7 +781,12 @@ window.__ModuleLoader__.load({
           remote: { status: 'unavailable' },
         }
         const probe = probeOf(this.ctx)
-        if (probe === undefined || typeof probe[PROBE_METHOD] !== 'function') return report
+        if (probe === undefined || typeof probe[PROBE_METHOD] !== 'function') {
+          // Not "the Host did not provide a probe": the page knows which of the
+          // mount outcomes it saw, and says so.
+          report.remote = describeProbeAbsence(probeState, probe, this.ctx)
+          return report
+        }
 
         report.remote = { status: 'running' }
         let answer
@@ -827,6 +926,17 @@ window.__ModuleLoader__.load({
     const DETAIL_STYLE = { margin: '4px 0 0 14px', opacity: 0.7 }
 
     /**
+     * Dictionary key per cause of an unavailable probe. `pending` is absent on
+     * purpose: an unmounted-in-flight probe has no cause to name yet.
+     */
+    const ABSENCE_KEY_OF = {
+      unsupported: 'probeNoMount',
+      refused: 'probeRefused',
+      unreadable: 'probeNotReadable',
+      'missing-method': 'probeMissingMethod',
+    }
+
+    /**
      * How one attempt reads: where the key came from, then the request itself.
      *
      * These are the facts that separate the failures a user cannot tell apart —
@@ -859,11 +969,26 @@ window.__ModuleLoader__.load({
      * @param t - the page's locale reader.
      * @returns the list item.
      */
+    /**
+     * The sentence for an unavailable probe, naming the cause when the page has
+     * one. An unidentified cause keeps the generic wording rather than
+     * inventing a reason.
+     * @param remote - the report's `remote` field.
+     * @param t - the page's locale reader.
+     * @returns the sentence to render.
+     */
+    function unavailableLine(remote, t) {
+      const key = ABSENCE_KEY_OF[String(remote?.cause ?? '')]
+      if (key === undefined) return t('probeUnavailable')
+      const detail = remote?.message
+      return detail === undefined || detail === null ? t(key) : format(t(key), { v: String(detail) })
+    }
+
     function remoteLine(remote, t) {
       const style = { margin: '8px 0 0' }
 
       if (remote === undefined || remote.status === 'running' || remote.status === 'unavailable') {
-        return React.createElement('li', { key: 'probe', style: { ...style, opacity: 0.6 } }, `· ${t('probeUnavailable')}`)
+        return React.createElement('li', { key: 'probe', style: { ...style, opacity: 0.6 } }, `· ${unavailableLine(remote, t)}`)
       }
 
       const children = [

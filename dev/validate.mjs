@@ -840,6 +840,65 @@ const enKeys = dictKeys('en')
 assert.deepEqual([...zhKeys].sort(), [...enKeys].sort(), 'zh 与 en 词典的键必须一一对应')
 ok(`zh / en 词典键对齐（各 ${zhKeys.size} 条）`)
 
+// --- why the probe is unavailable, said out loud --------------------------
+// This panel used to answer every one of five different failures with the same
+// sentence, and that sentence blamed the Host — the one party the page cannot
+// observe. A mount *the page itself* refused therefore read as the Host's
+// fault, which is both wrong and completely unactionable. Three of the four
+// causes are page-observable, so each has to reach the screen with its reason
+// attached.
+const blockOf = (marker) => clientSrc.slice(clientSrc.indexOf(marker), clientSrc.indexOf('}', clientSrc.indexOf(marker)))
+const absenceEntries = [...blockOf('const ABSENCE_KEY_OF').matchAll(/^\s*'?([a-z-]+)'?:\s*'([A-Za-z]+)'/gmu)]
+  .map((match) => [match[1], match[2]])
+assert.equal(absenceEntries.length, 4, `ABSENCE_KEY_OF 应有 4 个成因，实际 ${absenceEntries.length}`)
+
+// Both directions: a cause the panel can report with no sentence would render
+// the key itself, and a sentence with no cause is dead code that pretends to
+// cover something. `pending` is excluded because it deliberately keeps the
+// generic wording — an in-flight mount has no cause to name yet.
+const emittedCauses = new Set(
+  [
+    ...clientSrc
+      .slice(clientSrc.indexOf('function describeProbeAbsence'), clientSrc.indexOf('function mountProbe'))
+      .matchAll(/cause:\s*'([a-z-]+)'/gu),
+  ].map((match) => match[1]),
+)
+emittedCauses.delete('pending')
+assert.deepEqual(
+  [...emittedCauses].sort(),
+  absenceEntries.map(([cause]) => cause).sort(),
+  'describeProbeAbsence 报的成因与 ABSENCE_KEY_OF 的句子对不上',
+)
+
+for (const [cause, key] of absenceEntries) {
+  assert.ok(zhKeys.has(key), `zh 词典缺少探针缺席文案 ${key}（成因 ${cause}）`)
+  assert.ok(enKeys.has(key), `en 词典缺少探针缺席文案 ${key}（成因 ${cause}）`)
+}
+
+// One staged pair per traversal: `Card` itself consumes none, and each of
+// `expand`/`textOf` invokes the panel's two `useState` calls once. Staging twice
+// for one traversal leaves a residue that shifts every later render by one.
+const reportedAbsence = (remote) => {
+  pendingState.push({ local: [], dirty: false, remote }, false)
+  const tree = Card({ ...pageProps, t: zhTemplate })
+  return textOf(tree).join(' | ')
+}
+
+const absenceSentences = new Set()
+for (const [cause, key] of absenceEntries) {
+  const detail = cause === 'refused' ? 'gateway/invocation-unavailable: no active Remote method exports this endpoint' : cause === 'unreadable' ? 'customSearchProbe' : cause === 'missing-method' ? 'test' : undefined
+  const text = reportedAbsence({ status: 'unavailable', cause, ...(detail === undefined ? {} : { message: detail }) })
+  // Compared against the real template up to its placeholder, so this is the
+  // sentence a user reads rather than "something rendered".
+  const literal = zhTemplate(key).split('{v}')[0]
+  assert.ok(text.includes(literal), `成因 ${cause} 应渲染「${literal}」，实际渲染：${text}`)
+  if (detail !== undefined) assert.ok(text.includes(detail), `成因 ${cause} 必须把原因原样带出来，实际渲染：${text}`)
+  assert.ok(!text.includes(zhTemplate('probeUnavailable')), `成因 ${cause} 不该再用那句含糊话`)
+  absenceSentences.add(text)
+}
+assert.equal(absenceSentences.size, absenceEntries.length, '四个成因必须渲染成四句不同的话')
+ok(`探针缺席的 4 种成因各自渲染成不同的句子（含原因原文）`)
+
 // --- test-connection probe: the two hand-written declarations -------------
 // The panel reaches the Host's probe through a Remote call. Neither half can
 // generate its declaration — this package has no build step — so both are
