@@ -88,6 +88,9 @@ dsh plugin --profile desktop add github:Anixuil/dsh-custom-search#main
 > `github:` 源拉的是默认分支的当前提交，所以重装即拿到最新代码。
 > 要省掉反复重装，就按上面说的换成**本地目录**安装——之后只需重启。
 
+> **从 ≤0.1.0 升上来的注意**：旧版的 patch 写法会让面板卸载永久失败（报
+> `bundle-in-use`），卸载那一步走不通。照「卸载」一节末尾的手工步骤摘掉旧版，再装 0.2.0。
+
 ### 兼容性
 
 provider 契约（`ctx.web.registerSearchProvider` 与返回结构）是照着
@@ -183,24 +186,36 @@ fallback: tavily
 
 ## 安装后的实际改动
 
-`cordis.patch.yml` 往 profile 组合里写了三行：
+`cordis.patch.yml` 里有**两类**条目，区别很关键：
 
 ```yaml
-- insert:
-    - id: custom-search            # 本插件的行
+- insert:                          # ① 新行：本组合包「拥有」的行
+    - id: custom-search
       name: dsh-custom-search
       config: { ... }
 
-    - id: web                      # 把服务层指向本提供方
-      name: '@deepseek-ai/dsh-web'
-      config:
-        searchProvider: custom-search
-        fetchProvider: http        # 必须保留：patch 是整行替换，不是深合并
+# ② 覆盖行：改的是别的组合包已经声明的行（dsh-base 声明了它们）
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: custom-search
+    fetchProvider: http            # 必须保留：patch 是整行替换，不是深合并
 
-    - id: web-search-deepseek      # 关掉官方提供方
-      name: '@deepseek-ai/dsh-web-search-deepseek'
-      disabled: true
+- id: web-search-deepseek
+  name: '@deepseek-ai/dsh-web-search-deepseek'
+  disabled: true
 ```
+
+**为什么这两行不能放进 `insert:`。** `insert:` 的语义是「插入新行」——
+loader 以**空**列表为基准套用所有层，所以 `insert:` 里的行会被直接追加进树。
+而 `web` / `web-search-deepseek` 这两行由 `@deepseek-ai/dsh-base` 声明，id 已经被占用；
+再 `insert:` 一次只会多出**同名副本**，不会覆盖原来那行。
+
+更隐蔽的后果在卸载：插件管理器把「`insert:` 里的行」记为本组合包的组件
+（`bundleRows`），只要其中任何一行还挂着，就拒绝卸载并报
+`bundle-in-use`（「其他配置仍在使用这个组合包的组件，请先停用它们」）。
+`web` 那行的**正本**属于 `dsh-base`，永远不会下线——于是本组合包会**永远卸不掉**。
+写成顶层覆盖就没有这个问题：覆盖行不被算作本组合包的组件，卸载时随层一起失效。
 
 两个容易踩的点：
 
@@ -213,7 +228,7 @@ fallback: tavily
 ## 回到官方搜索
 
 **最省事**：在插件页把 `dsh-custom-search` 这个**组合包**整个关掉。它的 patch 层随之失效，
-那三行覆盖一起消失——`web` 的 `searchProvider` 回落、`web-search-deepseek` 不再被 `disabled`，
+那两条覆盖一起消失——`web` 的 `searchProvider` 回落、`web-search-deepseek` 不再被 `disabled`，
 官方搜索自动回来。
 
 **想保留插件、只临时切回官方搜索**：在 profile 的 `cordis.patch.yml` 里加两条覆盖：
@@ -238,10 +253,33 @@ fallback: tavily
 dsh plugin --profile desktop remove dsh-custom-search
 ```
 
-两条路都会连组合包一起摘掉，它携带的三行覆盖随之消失，**不需要**手工清理。
+两条路都会连组合包一起摘掉，它携带的两条覆盖随之消失，**不需要**手工清理。
 
 要清理的是**你自己**写进 profile patch 的那些条目（见上面的「配置」）——组合包没了以后
 `id: custom-search` 寻址不到任何一行，会被静默跳过；留在文件里只是垃圾。
+
+### 如果面板报「其他配置仍在使用这个组合包的组件」
+
+这条报错对应宿主的 `bundle-in-use`：管理器认为该组合包还有行挂在运行时里。
+**0.2.0 之前的版本一定会撞上它**——那时 `web` / `web-search-deepseek` 被写在 `insert:` 里，
+而它们的正本属于 `dsh-base`，永远不会下线，卸载检查因此永远过不去（见「安装后的实际改动」）。
+0.2.0 起改成顶层覆盖，面板卸载正常。
+
+已经装成旧版、被卡住的，手工摘掉即可（桌面端没有 `dsh` CLI，只能改文件）：
+
+```bash
+# 1) 停掉 Harness（或接受重启后生效）
+# 2) 从依赖里删掉这一行
+#    ~/.dsh/profiles/desktop/package.json       的 dependencies.dsh-custom-search
+# 3) 删掉 profile patch 里 id: custom-search 那个条目（若有）
+#    ~/.dsh/profiles/desktop/cordis.patch.yml
+# 4) 删目录（pnpm 会自己整理 lockfile）
+rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-custom-search
+# 5) 重启 Harness
+```
+
+`dsh.profile.bundles` 里如果还留着 `dsh-custom-search`，一并删掉。
+官方搜索在重启后自动回来。
 
 ## 安全说明
 
@@ -274,14 +312,14 @@ dsh-custom-search/
 ├── index.js          宿主半侧：Config schema、provider 注册、凭证解析、兜底链
 ├── client.js         浏览器半侧：插件页的配置表单（plugins.row.config）
 ├── engines.js        引擎适配表：每个引擎的 build（怎么发请求）+ parse（怎么读响应）
-├── cordis.patch.yml  安装时写入 profile 组合的三行覆盖
+├── cordis.patch.yml  组合包 patch：1 行 insert（本插件的行）+ 2 条对既有行的覆盖
 ├── package.json      dsh.bundle.patch + dsh.client 声明、icon、locale、files 白名单
 ├── locale/           面板显示用的中英文标题与描述
 ├── icon.svg
 ├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
     ├── smoke.mjs     13 项：provider 契约、归一化、去重、兜底、取消、错误码
-    ├── validate.mjs  28 项：清单、patch 方言、patch 与 Config 对齐、浏览器半侧契约
+    ├── validate.mjs  31 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、浏览器半侧契约
     └── asar.py       从 DSH 安装包里抽源码/依赖的解析脚本
 ```
 
@@ -315,6 +353,10 @@ node validate.mjs   # 清单、patch 方言、patch 与 Config 对齐，以及�
 `validate.mjs` 里浏览器半侧那几项值得一提：factory id、`plugins.row.config` 的 key、
 `configForms` 用的命名空间、以及每个 `require` 是否命中平台模块表。
 **这些全都只会静默失败**——写错一个字符，插件行就只剩启停开关，没有任何报错。
+
+行归属那几项同理：脚本会照 `applyEntryPatches` 的语义把各层合成一遍，断言
+`insert:` 里只有本包自己的行、合成后 `web` / `web-search-deepseek` 各只有一份。
+把覆盖行误写进 `insert:` 时，运行期只表现为「卸载按钮报错」，这里会当场失败。
 
 两个脚本需要 `js-yaml`、`@deepseek-ai/schemastery`、`@deepseek-ai/cosmokit`
 （已放在本目录的 `node_modules/`，被 `.gitignore` 忽略）。

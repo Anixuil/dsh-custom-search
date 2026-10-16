@@ -1,13 +1,29 @@
 # Bundle patch for dsh-custom-search.
 #
-# Switching the search backend is one config value, not a plugin swap: the `web`
-# seam (`@deepseek-ai/dsh-web`) owns provider selection and resolves it by id.
+# Two kinds of entry live in a patch file, and confusing them is a trap:
 #
-# Remember: a patch replaces the targeted row's WHOLE `config`, it does not merge
-# into it. That is why the `web` row below restates `fetchProvider`.
+#   * A row under `insert:` is a NEW row this bundle brings into being. It is
+#     attributed to this bundle — the plugin manager counts it as one of "this
+#     bundle's components" and refuses to uninstall the bundle while any of
+#     them is still mounted.
+#   * A top-level row WITHOUT `insert:` is an OVERRIDE of a row some earlier
+#     layer already declared. `name:` is an assertion that is checked against
+#     the target. Overrides are NOT attributed to this bundle, so they never
+#     block removal; the plugin page lists them as this bundle's overrides.
+#
+# So the row we own goes under `insert:`, while the two rows we merely point at
+# us — `web` and `web-search-deepseek`, both declared by
+# `@deepseek-ai/dsh-base` — are plain overrides. Declaring them under `insert:`
+# would append DUPLICATE rows with ids that are already taken, and would also
+# make this bundle permanently uninstallable (`bundle-in-use`): the originals
+# belong to `dsh-base` and stay mounted forever.
+#
+# Also remember: an override replaces the targeted row's WHOLE `config`, it does
+# not merge into it. That is why the `web` override below restates
+# `fetchProvider`.
 
 - insert:
-    # The provider row. Its `config` is the surface the Settings form edits, so
+    # The provider row. Its `config` is the surface the settings form edits, so
     # every field of the plugin's Config schema appears here with its default.
     - id: custom-search
       name: dsh-custom-search
@@ -24,18 +40,19 @@
         language: zh-CN
         safeSearch: moderate
 
-    # Point the seam at this provider.
-    # `fetchProvider: http` must stay: dropping it leaves web_fetch with no backend.
-    - id: web
-      name: '@deepseek-ai/dsh-web'
-      config:
-        searchProvider: custom-search
-        fetchProvider: http
+# Point the seam at this provider.
+# `fetchProvider: http` must stay: this replaces the row's whole config, so
+# dropping it leaves web_fetch with no backend.
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: custom-search
+    fetchProvider: http
 
-    # Switch the official backend off so exactly one search provider is usable.
-    # Without this, clearing `searchProvider` above would resolve to
-    # WEB_PROVIDER_AMBIGUOUS instead of falling back to this plugin.
-    # Set `disabled: false` to keep DeepSeek native search mounted alongside.
-    - id: web-search-deepseek
-      name: '@deepseek-ai/dsh-web-search-deepseek'
-      disabled: true
+# Switch the official backend off so exactly one search provider is usable.
+# Without this, clearing `searchProvider` above would resolve to
+# WEB_PROVIDER_AMBIGUOUS instead of falling back to this plugin.
+# Set `disabled: false` to keep DeepSeek native search mounted alongside.
+- id: web-search-deepseek
+  name: '@deepseek-ai/dsh-web-search-deepseek'
+  disabled: true

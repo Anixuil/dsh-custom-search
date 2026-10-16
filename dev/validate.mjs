@@ -7,11 +7,14 @@
  *   3. every key the patch writes into the plugin row exists in the plugin's
  *      Config schema — a typo there is silently dropped by the loader,
  *   4. the browser half satisfies the client-modules contract, so the Plugins
- *      page actually mounts a config page for this row.
+ *      page actually mounts a config page for this row,
+ *   5. the patch distinguishes rows this bundle OWNS (`insert:`) from rows it
+ *      merely overrides — getting that wrong makes the bundle uninstallable.
  *
- * Everything in (4) fails SILENTLY at runtime: a wrong factory id, slot key, or
- * configForms namespace leaves the row with nothing but a toggle, and nothing
- * reports an error. Hence the assertions.
+ * Everything in (4) and (5) fails SILENTLY at runtime: a wrong factory id, slot
+ * key, or configForms namespace leaves the row with nothing but a toggle, and a
+ * foreign row declared under `insert:` looks fine until the user clicks 卸载.
+ * Hence the assertions.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -85,6 +88,103 @@ ok('web 行同时声明 searchProvider 与 fetchProvider（整行替换语义）
 
 assert.equal(byId.get('web-search-deepseek')?.disabled, true, '官方 provider 应被关闭以避免歧义')
 ok('官方 web-search-deepseek 行已关闭，避免 WEB_PROVIDER_AMBIGUOUS')
+
+// --- which rows this bundle OWNS vs. merely overrides ---------------------
+// The plugin manager attributes only a bundle's `insert:` rows to that bundle
+// (`bundleRows`), and refuses to uninstall while any of them is still mounted
+// (`bundle-in-use`). Rows declared by another bundle — `web` and
+// `web-search-deepseek` here, both inserted by `@deepseek-ai/dsh-base` — must
+// therefore be plain top-level overrides. Put them under `insert:` instead and
+// two things break at once, both silently until the user clicks 卸载:
+//   1. `applyEntryPatches` appends them as EXTRA rows (ids are already taken),
+//      so the tree ends up with duplicate `web` / `web-search-deepseek` rows;
+//   2. those duplicates' originals stay mounted forever, so the uninstall check
+//      can never pass.
+const insertRows = patches.flatMap((entry) => entry?.insert ?? [])
+const overrideRows = patches.filter((entry) => entry?.insert === undefined)
+
+for (const row of insertRows) {
+  assert.equal(
+    row.name,
+    pkg.name,
+    `insert 行 "${row.id}" 的 name 是 ${row.name}，不是本包 —— 别的组合包已经在声明它了，` +
+      '放进 insert 会多出一行同名副本，并让本组合包永远无法卸载',
+  )
+}
+ok(`insert 只声明本包自己的行（${insertRows.map((row) => row.id).join(', ')}）`)
+
+// The loader composes every layer against an EMPTY base (`applyEntryPatches([], …)`),
+// so a bundle's `insert:` list is exactly what it contributes to the tree — and
+// exactly what `bundleRows` reports back to the uninstall check. Reproduce that
+// call here so the invariant is pinned rather than argued.
+function applyEntryPatches(data, patchList) {
+  data = structuredClone(data)
+  const entryMap = new Map()
+  const buildMap = (entries) => {
+    for (const entry of entries) {
+      if (entry.id) entryMap.set(entry.id, entry)
+      if (entry.group && Array.isArray(entry.config)) buildMap(entry.config)
+    }
+  }
+  buildMap(data)
+  for (const patch of patchList) {
+    const { id, insert, name, ...overrides } = patch
+    if (insert) {
+      if (id) {
+        const target = entryMap.get(id)
+        if (!target || !target.group) continue
+        if (!Array.isArray(target.config)) target.config = []
+        target.config.push(...insert)
+      } else data.push(...insert)
+      buildMap(insert)
+      continue
+    }
+    if (!id) continue
+    const target = entryMap.get(id)
+    if (!target || (name && name !== target.name)) continue
+    for (const [key, value] of Object.entries(overrides)) {
+      if (key !== 'id') target[key] = value
+    }
+  }
+  return data
+}
+
+const contributed = applyEntryPatches([], patches)
+assert.deepEqual(
+  contributed.map((row) => row.id),
+  insertRows.map((row) => row.id),
+  '本组合包贡献给树的行必须恰好等于它的 insert 行 —— 这是卸载检查的依据',
+)
+ok(`本组合包只贡献 ${contributed.length} 行（${contributed.map((row) => row.id).join(', ')}）`)
+
+// End to end over a stand-in for the real layer below: the `web` and
+// `web-search-deepseek` rows as `@deepseek-ai/dsh-base` declares them (mirrored
+// from its cordis.patch.yml). Our layer must OVERRIDE those rows in place —
+// one row each, patched — never append copies.
+const baseLayer = [
+  {
+    insert: [
+      { id: 'web', name: '@deepseek-ai/dsh-web', config: { searchProvider: 'deepseek-official', fetchProvider: 'http' } },
+      { id: 'web-search-deepseek', name: '@deepseek-ai/dsh-web-search-deepseek', config: { apiKeyEnv: 'DEEPSEEK_API_KEY' } },
+    ],
+  },
+]
+const composed = applyEntryPatches(applyEntryPatches([], baseLayer), patches)
+for (const id of ['custom-search', 'web', 'web-search-deepseek']) {
+  assert.equal(composed.filter((row) => row.id === id).length, 1, `合成后 "${id}" 必须只有一行`)
+}
+assert.equal(
+  composed.find((row) => row.id === 'web').config.searchProvider,
+  'custom-search',
+  'web 行必须被就地改为指向本 provider',
+)
+assert.equal(composed.find((row) => row.id === 'web-search-deepseek').disabled, true)
+assert.equal(
+  composed.find((row) => row.id === 'web-search-deepseek').config.apiKeyEnv,
+  'DEEPSEEK_API_KEY',
+  '只写 disabled 的覆盖不应清掉该行原有的 config',
+)
+ok('覆盖层叠在 dsh-base 之上：3 行各一份，web 指向本 provider，官方 provider 被关停')
 
 // --- patch config vs. the plugin's Config schema --------------------------
 const { Config, PROVIDER_ID } = await import('../index.js')
