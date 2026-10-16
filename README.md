@@ -46,6 +46,17 @@ dsh plugin --profile desktop add <本仓库的绝对路径>
 
 也可以走桌面端面板：在「+ 添加插件」里填本仓库的绝对路径或上面的 GitHub 地址。
 
+<p align="center">
+  <img src="docs/install-from-github.png" width="400" alt="在桌面端「+ 添加插件」里填入 github:Anixuil/dsh-custom-search，被识别为「Git 仓库」来源">
+  <img src="docs/installed.png" width="400" alt="安装完成：pnpm add github:Anixuil/dsh-custom-search 成功，点「立即启用」">
+</p>
+
+左：面板把 `github:Anixuil/dsh-custom-search` 识别为「Git 仓库」来源，底层走 `pnpm add` 拉取。
+右：安装完成，落点是 profile 目录 `~/.dsh/profiles/desktop`，点「立即启用」。
+
+> 面板那一栏填的是**安装源**（npm 包名 / GitHub 源 / 本地路径），不是插件名。
+> 直接填 `dsh-custom-search` 会提示「未找到相关插件」——这个名字在 npm 上还没发布。
+
 装完**重启 Harness** 才生效（bundle 类插件不会热加载）。桌面端用「重启 Harness」或退出重开。
 
 > `desktop` 是 DeepSeek Harness 桌面端的 profile 名（数据目录 `~/.dsh/profiles/desktop`）。
@@ -193,6 +204,7 @@ dsh-custom-search/
 ├── package.json      dsh.bundle.patch 声明、icon、locale、files 白名单
 ├── locale/           面板显示用的中英文标题与描述
 ├── icon.svg
+├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
     ├── smoke.mjs     13 项：provider 契约、归一化、去重、兜底、取消、错误码
     ├── validate.mjs  15 项：清单、patch 方言、patch 与 Config schema 对齐
