@@ -275,6 +275,7 @@ window.__ModuleLoader__.load({
       probeRequest: '{m} {url}',
       probeStatus: 'HTTP {s} · {ms} ms',
       probeNoStatus: '未拿到响应 · {ms} ms',
+      probeNote: '· {v}',
       probeCredential: '密钥来源：{v}',
       keySourceLiteral: '配置里的字面密钥',
       keySourceCredential: '凭据服务（{v}）',
@@ -349,6 +350,7 @@ window.__ModuleLoader__.load({
       probeRequest: '{m} {url}',
       probeStatus: 'HTTP {s} · {ms} ms',
       probeNoStatus: 'no response · {ms} ms',
+      probeNote: '· {v}',
       probeCredential: 'Credential from: {v}',
       keySourceLiteral: 'the literal key in the settings',
       keySourceCredential: 'the credentials service ({v})',
@@ -1003,6 +1005,9 @@ window.__ModuleLoader__.load({
       const ms = Number.isFinite(attempt?.ms) ? attempt.ms : 0
       if (Number.isFinite(attempt?.status)) rows.push(format(t('probeStatus'), { s: attempt.status, ms }))
       else if (attempt?.endpoint !== undefined && attempt?.endpoint !== null) rows.push(format(t('probeNoStatus'), { ms }))
+      for (const note of (Array.isArray(attempt?.notes) ? attempt.notes : [])) {
+        rows.push(format(t('probeNote'), { v: String(note) }))
+      }
       return rows
     }
 

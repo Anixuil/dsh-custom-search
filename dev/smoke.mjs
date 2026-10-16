@@ -35,6 +35,7 @@ const server = http.createServer((req, res) => {
       path: url.pathname,
       search: url.search,
       query: url.searchParams.get('q'),
+      searchLang: url.searchParams.get('search_lang'),
       headers: req.headers,
     })
 
@@ -48,6 +49,18 @@ const server = http.createServer((req, res) => {
     if (q.startsWith('boom')) {
       res.writeHead(500, { 'content-type': 'text/plain' })
       res.end('upstream exploded')
+      return
+    }
+    if (url.pathname.endsWith('/res/v1/web/search')) {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        web: {
+          results: [
+            { url: 'https://brave.example/1', title: 'Brave 1', description: 'first', page_age: '2026-02-03' },
+            { url: 'https://brave.example/2', title: 'Brave 2', description: 'second' },
+          ],
+        },
+      }))
       return
     }
 
@@ -269,7 +282,33 @@ await assert.rejects(
 )
 ok('Google CSE 缺 cx 时给出明确提示')
 
-// 14. The settings page's connectivity report is the plugin's only user-facing
+// 14. Brave validates `search_lang` against a closed enum and answers a value
+// that is not on the list with 422 — which kills the whole search, not just the
+// hint. A bare `zh` is not on that list, and `zh-CN` is this plugin's DEFAULT
+// language, so the obvious normalization (drop the region subtag) is exactly the
+// move that breaks the default configuration.
+const brave = mount({ engine: 'brave', apiKey: 'bk-test', language: 'zh-CN' })
+const braveResult = await brave.search({ query: 'brave query', maxResults: 5 }, undefined)
+const braveCall = calls.at(-1)
+assert.equal(braveCall.path, '/res/v1/web/search')
+assert.equal(braveCall.headers['x-subscription-token'], 'bk-test')
+assert.equal(braveCall.searchLang, 'zh-hans', 'zh-CN 必须映射为 zh-hans，不能截成裸 zh')
+assert.deepEqual(braveResult.sources.map((s) => s.url), ['https://brave.example/1', 'https://brave.example/2'])
+ok('brave：search_lang 由 zh-CN 映射为 zh-hans，不再发出会被 422 拒绝的裸 zh')
+
+// 15. A language Brave has no tag for is dropped rather than guessed — a wrong
+// value costs the whole search, a missing one only costs the language hint. The
+// omission is reported, so it cannot pass silently.
+const unmappable = await mountWithProbe({ engine: 'brave', apiKey: 'bk-test', language: 'id-ID' })
+const unmappableReport = await unmappable.probe.test('brave query')
+assert.equal(unmappableReport.ok, true)
+assert.equal(unmappableReport.attempts[0].endpoint, `${origin}/res/v1/web/search`)
+assert.equal(calls.at(-1).searchLang, null, '无法映射的语言必须省略 search_lang')
+assert.equal(unmappableReport.attempts[0].notes.length, 1, '省略参数时必须留下一条说明')
+assert.match(unmappableReport.attempts[0].notes[0], /id-ID/)
+ok('brave：无法映射的语言省略 search_lang 并在报告里说明，而不是发出去等 422')
+
+// 16. The settings page's connectivity report is the plugin's only user-facing
 // proof that a key works, so it must show the real exchange: which host was
 // called, what status came back, how long it took, and where the key came from.
 const probed = await mountWithProbe({})
@@ -289,7 +328,7 @@ assert.ok(Number.isFinite(successAttempt.ms))
 assert.deepEqual(probeReport.sources.map((source) => source.url), ['https://searx.example/1', 'https://searx.example/2'])
 ok('探针报告带状态码、端点、耗时与结果（查询串已剔除）')
 
-// 15. A failure reports the same facts, so "bad key" and "wrong host" differ.
+// 17. A failure reports the same facts, so "bad key" and "wrong host" differ.
 const broken = await mountWithProbe({})
 const brokenReport = await broken.probe.test('boom-now')
 assert.equal(brokenReport.ok, false)
@@ -300,7 +339,7 @@ assert.match(String(brokenReport.attempts[0].error), /HTTP 500/)
 assert.equal(brokenReport.attempts[0].endpoint, `${origin}/search`)
 ok('探针失败时仍报告状态码与端点，而不是只说失败')
 
-// 16. The report must never carry key material or the query text: it is rendered
+// 18. The report must never carry key material or the query text: it is rendered
 // in a settings page and quoted in bug reports.
 const keyed2 = await mountWithProbe({ engine: 'tavily', apiKey: 'tv-secret-value', endpoints: JSON.stringify({ tavily: origin }) })
 const keyed2Report = await keyed2.probe.test('keyed')
@@ -310,7 +349,7 @@ assert.ok(!JSON.stringify(keyed2Report).includes('tv-secret-value'), '报告不�
 assert.ok(!JSON.stringify(probeReport).includes('q=hello'), '报告不得泄漏查询串')
 ok('探针报告不泄漏密钥与查询串')
 
-// 17. Fallback shows up as several attempts, so a green result cannot hide a
+// 19. Fallback shows up as several attempts, so a green result cannot hide a
 // broken primary engine. The literal key belongs to the primary engine only, so
 // the fallback resolves its own — and the report names where it found it.
 process.env.TAVILY_API_KEY = 'tk-from-env'
@@ -329,7 +368,7 @@ assert.equal(fallbackReport.attempts[1].credential, 'process-env')
 assert.equal(fallbackReport.attempts[1].ref, 'TAVILY_API_KEY')
 ok('兜底链的每一跳都留在报告里，并各自标注密钥来源')
 
-// 18. Truly degraded: with no Typert package installed, `installProbe` must bow
+// 20. Truly degraded: with no Typert package installed, `installProbe` must bow
 // out, say why and leave the provider intact. This runs in a child process
 // without the resolve hook, so the stand-in cannot mask the real import failure.
 const degraded = spawnSync(process.execPath, [fileURLToPath(new URL('./degraded-probe.mjs', import.meta.url))], {

@@ -411,6 +411,7 @@ async function installProbe(ctx, provider) {
             error: record.error ?? null,
             credential: record.credential?.source ?? null,
             ref: record.credential?.ref ?? null,
+            notes: Array.isArray(record.notes) ? record.notes.map(String).slice(0, 4) : [],
           })
         })
         report.count = sources.length

@@ -21,6 +21,67 @@ const SAFE_SEARCH = {
   serper: { off: 'off', moderate: 'active', strict: 'active' },
 }
 
+/**
+ * The tags Brave accepts for `search_lang`.
+ *
+ * Brave validates this against a closed enum and answers a value that is not on
+ * the list with `HTTP 422 · Unable to validate request parameter(s)`, which kills
+ * the entire search. It is not a locale field, so the shapes a user naturally
+ * writes do not fit it:
+ *
+ *   - it takes a region subtag only in `en-gb`, `pt-br` and `pt-pt` — `en-US`,
+ *     `fr-FR` and `de-DE` have no such tags;
+ *   - two languages are spelled against the ISO-639-1 convention: Japanese is
+ *     `jp`, not `ja`, and Norwegian is `nb`, not `no`;
+ *   - Chinese has no bare form at all — it must name the script, `zh-hans` or
+ *     `zh-hant`.
+ *
+ * Sending `zh` for the default `zh-CN` setting is what produced the 422. This is
+ * why the table is transcribed rather than derived: a plausible-looking
+ * normalization (drop the subtag) is exactly the wrong move here.
+ */
+export const BRAVE_SEARCH_LANGS = new Set([
+  'ar', 'eu', 'bn', 'bg', 'ca', 'zh-hans', 'zh-hant', 'hr', 'cs', 'da', 'nl', 'en', 'en-gb',
+  'et', 'fi', 'fr', 'gl', 'de', 'gu', 'he', 'hi', 'hu', 'is', 'it', 'jp', 'kn', 'ko', 'lv',
+  'lt', 'ms', 'ml', 'mr', 'nb', 'pl', 'pt-br', 'pt-pt', 'pa', 'ro', 'ru', 'sr', 'sk', 'sl',
+  'es', 'sv', 'ta', 'te', 'th', 'tr', 'uk', 'vi',
+])
+
+/** Languages whose Brave tag is not the one the locale string suggests. */
+const BRAVE_LANG_ALIASES = { ja: 'jp', no: 'nb' }
+
+/** Which script a Chinese region implies, for the bare `zh` tags Brave refuses. */
+const BRAVE_CHINESE_SCRIPTS = {
+  cn: 'zh-hans', sg: 'zh-hans', my: 'zh-hans',
+  tw: 'zh-hant', hk: 'zh-hant', mo: 'zh-hant',
+}
+
+/**
+ * Translate the plugin's `language` setting into a Brave `search_lang` tag.
+ *
+ * Returns `undefined` when the language has no Brave tag at all. Omitting the
+ * parameter costs a language hint; sending a guessed one costs the whole search,
+ * so an unmappable value is dropped and reported rather than approximated.
+ *
+ * @param language - the configured language, in any BCP-47-ish spelling.
+ * @returns a tag from {@link BRAVE_SEARCH_LANGS}, or `undefined`.
+ */
+export function braveSearchLang(language) {
+  const raw = text(language)
+  if (raw === undefined) return undefined
+  const tag = raw.toLowerCase().replace(/_/g, '-')
+  if (BRAVE_SEARCH_LANGS.has(tag)) return tag
+
+  const [primary, ...rest] = tag.split('-')
+  if (primary === 'zh') {
+    if (rest[0] === 'hans' || rest[0] === 'hant') return `zh-${rest[0]}`
+    return BRAVE_CHINESE_SCRIPTS[rest[0]] ?? 'zh-hans'
+  }
+  const aliased = BRAVE_LANG_ALIASES[primary]
+  if (aliased !== undefined) return aliased
+  return BRAVE_SEARCH_LANGS.has(primary) ? primary : undefined
+}
+
 function text(value) {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
 }
@@ -294,10 +355,19 @@ export const ENGINES = {
       params.set('q', request.query)
       params.set('count', String(Math.min(options.maxResults, 20)))
       params.set('safesearch', SAFE_SEARCH.brave[options.safeSearch] ?? 'moderate')
-      if (options.language !== undefined) params.set('search_lang', options.language.split('-')[0])
+      const notes = []
+      if (options.language !== undefined) {
+        const lang = braveSearchLang(options.language)
+        if (lang === undefined) {
+          notes.push(`Brave 没有「${options.language}」对应的 search_lang，已省略该参数（Brave 只认 50 个固定标签，中文须写 zh-hans / zh-hant）`)
+        } else {
+          params.set('search_lang', lang)
+        }
+      }
       return {
         url: url.toString(),
         init: { method: 'GET', headers: { 'x-subscription-token': apiKey } },
+        notes,
       }
     },
     parse(json) {
@@ -421,9 +491,16 @@ export async function runEngine(engineId, query, options, apiKey, signal) {
 
   const trace = typeof options.trace === 'function' ? options.trace : undefined
   const startedAt = Date.now()
+  let notes = []
   const report = (record) => {
     if (trace === undefined) return
-    trace({ engine: engineId, engineLabel: engine.label, ms: Date.now() - startedAt, ...record })
+    trace({
+      engine: engineId,
+      engineLabel: engine.label,
+      ms: Date.now() - startedAt,
+      ...(notes.length > 0 ? { notes: [...notes] } : {}),
+      ...record,
+    })
   }
 
   const wantsKey = engine.keyless !== true
@@ -437,7 +514,8 @@ export async function runEngine(engineId, query, options, apiKey, signal) {
   }
 
   const base = baseUrl(options.endpointOverride, engine.defaultEndpoint)
-  const { url, init } = engine.build({ query }, options, base, text(apiKey))
+  const { url, init, notes: builtNotes } = engine.build({ query }, options, base, text(apiKey))
+  if (Array.isArray(builtNotes)) notes = builtNotes.map((note) => text(note)).filter((note) => note !== undefined)
   const endpoint = publicEndpoint(url)
   const method = init?.method ?? 'GET'
 

@@ -257,7 +257,7 @@ Loader 应用，不用重启。
 | `searchDepth` | `basic` | 仅 Tavily：`basic` / `advanced`（advanced 消耗更多额度） |
 | `maxResults` | `8` | 单次搜索最多返回多少条来源，上限 20 |
 | `timeoutMs` | `20000` | 单次搜索超时（毫秒） |
-| `language` | `zh-CN` | 语言/地区提示，各引擎会映射成自己的参数 |
+| `language` | `zh-CN` | 语言/地区提示，各引擎会映射成自己的参数。**Brave 例外**：它只认 50 个固定标签（中文须写 `zh-hans` / `zh-hant`，日语是 `jp`、挪威语是 `nb`），本插件会自动换算；换算不出来的语言会**省略该参数并在连接报告里说明**，而不是发出去等 422 |
 | `safeSearch` | `moderate` | `off` / `moderate` / `strict`，引擎不支持时忽略 |
 
 ### 各引擎怎么准备
@@ -450,8 +450,8 @@ dsh-custom-search/
 ├── icon.svg
 ├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
-    ├── smoke.mjs        18 项：provider 契约、归一化、去重、兜底、取消、错误码、探针报告与脱敏
-    ├── validate.mjs     54 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、peerDependencies 对账、浏览器半侧的契约与渲染、探针两端一致性与缺席文案
+    ├── smoke.mjs        20 项：provider 契约、归一化、去重、兜底、取消、错误码、Brave 语言映射与参数省略、探针报告与脱敏
+    ├── validate.mjs     55 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、peerDependencies 对账、Brave 语言枚举、浏览器半侧的契约与渲染、探针两端一致性与缺席文案
     ├── degraded-probe.mjs  子进程跑的降级用例：没有 Typert 包时探针缺席但 provider 照常
     ├── stubs/           只在 dev 里顶替 @deepseek-ai/dsh-typert-protocol（含注册用的 resolve hook）
     ├── bundle-rows.mjs  对着任一份 patch 复现卸载判据（bundle-in-use），非本包的行会标出来
@@ -490,6 +490,14 @@ python peer-closure.py   # 安装包到底供不供得起本插件声明的每�
 
 `degraded-probe.mjs` 不用手动跑——`smoke.mjs` 会用子进程拉它起来（必须另起进程，
 因为 resolve hook 是按进程注册的）。
+
+`validate.mjs` 里那条 Brave 语言断言值得单说：`language` 是本插件唯一一个**发给外部服务、
+却被对方用封闭枚举校验**的参数，而 Brave 对不在枚举里的值直接回 422 —— 整个搜索失败，
+不只是丢一个提示。默认值 `zh-CN` 恰好是最容易踩雷的形状（Brave 没有裸 `zh`）。
+所以断言的不是「每个映射对不对」这一件事，而是更硬的不变量：**`braveSearchLang()` 的返回值
+要么是 `undefined`，要么必须是枚举成员**，用 40 个越界探针（含 `id-ID`、`xx-YY`、`ja`、
+`no`、`pt`、空串、`null`、对象）去撞。想验证这条护栏真的会咬，就把 `braveSearchLang`
+改回 `language.split('-')[0]` —— 两个套件都会当场失败。
 
 `validate.mjs` 里浏览器半侧那段最值得一提：它**真的把 `client.js` 跑了两遍**——先在 `vm` 里
 用 stub 的 `require` 物化工厂，拿一份假 `ctx` 调 `apply(ctx)`，检查它到底注册了什么；再拿一份

@@ -682,6 +682,7 @@ const reportedReport = {
         count: 2,
         credential: 'credential',
         ref: 'BRAVE_API_KEY',
+        notes: ['Brave 没有「id-ID」对应的 search_lang，已省略该参数'],
       },
     ],
     sources: [{ title: 'Alpha', url: 'https://example.test/a' }],
@@ -706,7 +707,10 @@ ok('带探针报告时 page 视图渲染成功（检查行 + 请求明细 + 来�
 assert.match(reportedText, /HTTP 200 · 12 ms/u, '报告必须写出状态码与往返耗时')
 assert.match(reportedText, /GET https:\/\/api\.example\.test\/res\/v1\/web\/search/u, '报告必须写出方法与脱敏端点')
 assert.match(reportedText, /密钥来源：凭据服务（BRAVE_API_KEY）/u, '报告必须写出密钥来源与引用名')
-ok('报告明细（状态码 / 方法 / 端点 / 密钥来源）真的渲染出来了')
+// A dropped request parameter is a silent degradation unless the report says so;
+// that visit is how the Brave 422 was finally located.
+assert.match(reportedText, /Brave 没有「id-ID」对应的 search_lang，已省略该参数/u, '报告必须写出被省略的请求参数')
+ok('报告明细（状态码 / 方法 / 端点 / 密钥来源 / 参数说明）真的渲染出来了')
 
 // Every credential origin the Host can report must have a dictionary entry;
 // a missing one drops the line silently, and that line is the fix instruction.
@@ -828,6 +832,53 @@ for (const engine of clientEngines) {
   )
 }
 ok(`客户端引擎清单与 engines.js 一致（${clientEngines.length} 个，含凭证变量名）`)
+
+// Brave is the only adapter whose language parameter is a closed enum, and it
+// answers an off-list value with 422 — failing the ENTIRE search over a hint
+// that only nudges ranking. The plugin's default language is `zh-CN`, so the
+// natural normalization (drop the region subtag) is precisely what breaks a
+// default install: Brave has no bare `zh`, only `zh-hans` / `zh-hant`.
+//
+// The assertion below is the invariant that actually protects the request:
+// whatever the resolver returns must be a member of the enum. The case list
+// pins the mappings that differ from a naive transformation.
+const { BRAVE_SEARCH_LANGS, braveSearchLang } = await import('../engines.js')
+assert.equal(BRAVE_SEARCH_LANGS.size, 50, `Brave 的 search_lang 枚举应为 50 个标签（照其 schema 转录），实际 ${BRAVE_SEARCH_LANGS.size}`)
+for (const quirk of ['jp', 'nb', 'zh-hans', 'zh-hant', 'en-gb', 'pt-br', 'pt-pt', 'gl', 'eu']) {
+  assert.ok(BRAVE_SEARCH_LANGS.has(quirk), `Brave 枚举缺少 ${quirk}`)
+}
+for (const notATag of ['zh', 'ja', 'no', 'pt', 'zh-CN', 'en-US', 'en-us']) {
+  assert.ok(!BRAVE_SEARCH_LANGS.has(notATag), `${notATag} 不是 Brave 的标签，不该出现在枚举里`)
+}
+
+const BRAVE_LANG_CASES = [
+  ['zh-CN', 'zh-hans'], ['zh-TW', 'zh-hant'], ['zh-HK', 'zh-hant'], ['zh-MO', 'zh-hant'],
+  ['zh-SG', 'zh-hans'], ['zh', 'zh-hans'], ['zh-Hans', 'zh-hans'], ['zh-Hant-TW', 'zh-hant'],
+  ['zh_TW', 'zh-hant'],
+  ['en', 'en'], ['en-US', 'en'], ['en-GB', 'en-gb'], ['EN-gb', 'en-gb'],
+  ['ja', 'jp'], ['ja-JP', 'jp'], ['no-NO', 'nb'], ['nb', 'nb'],
+  ['pt-BR', 'pt-br'], ['pt-PT', 'pt-pt'],
+  ['fr', 'fr'], ['fr-FR', 'fr'], ['de-DE', 'de'], ['es-419', 'es'], ['ko-KR', 'ko'],
+]
+for (const [input, expected] of BRAVE_LANG_CASES) {
+  assert.equal(braveSearchLang(input), expected, `braveSearchLang(${input}) 应为 ${expected}`)
+}
+
+const BRAVE_LANG_PROBES = [
+  ...BRAVE_LANG_CASES.map(([input]) => input),
+  'id-ID', 'id', 'az', 'xx', 'xx-YY', 'no', 'pt', 'sr-Latn-RS', 'en-US-POSIX', 'zh-Hans-CN',
+  '', '   ', null, undefined, 0, {},
+]
+for (const probe of BRAVE_LANG_PROBES) {
+  const mapped = braveSearchLang(probe)
+  assert.ok(
+    mapped === undefined || BRAVE_SEARCH_LANGS.has(mapped),
+    `braveSearchLang(${JSON.stringify(probe)}) = ${JSON.stringify(mapped)} 不在 Brave 枚举里 —— 发出去就是 422`,
+  )
+}
+assert.equal(braveSearchLang('id-ID'), undefined, 'Brave 没有印尼语标签，应省略而不是猜一个')
+assert.equal(braveSearchLang(''), undefined, '空语言应省略')
+ok(`Brave 的 search_lang 映射守住封闭枚举（${BRAVE_LANG_CASES.length} 个用例 + ${BRAVE_LANG_PROBES.length} 个越界探针）`)
 
 // A label missing from one dictionary renders as the raw key in that language.
 const dictKeys = (name) => {
