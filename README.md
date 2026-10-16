@@ -78,8 +78,54 @@ provider 契约（`ctx.web.registerSearchProvider` 与返回结构）是照着
 
 ## 配置
 
-设置 → 插件 → 插件配置 → **自定义搜索引擎**。
-表单由插件 `Config` schema 里标记为 `volatile()` 的字段自动生成，改动**立即生效，不用重启**。
+> **本插件目前没有图形配置界面。** 详见下面的原因与写法。
+
+### 为什么界面上找不到配置入口
+
+DSH 的配置页**不是**从 `Config` schema 自动生成的。插件页只显示**自己注册了配置页**的插件——
+注册靠插件的「浏览器半侧」调用 `ctx.slots.inject()`，占用插件页声明的三个 slot 之一：
+
+| slot | key | 出现在 |
+|---|---|---|
+| `plugins.item` | 条目 id | 官方分组里 |
+| `plugins.bundle.config` | **包名** | 组合包页描述与组件行**之间** |
+| `plugins.row.config` | `<包名>#<行 id>` | 该行多出一个**配置**控件，点开是独立页面 |
+
+安装随附的四个宿主平面配置页（shell 执行器、agent loop、子智能体、DeepSeek 搜索提供方）
+**各来自一个伴生包**（`dsh-client-ui-settings-shell` / `-agent-loop` / `-subagent` /
+`-settings-web-search`）。设置里的「插件」分区是**只读**清单，不提供编辑。
+
+本插件只发布了宿主半侧（`apply(ctx)`），没有浏览器半侧，所以插件页上它只有启停开关。
+这一点在插件页自己就能验证：组件行上没有「配置」控件。
+
+### 现在怎么配
+
+写进 **profile 的 patch 层**，它在所有 bundle 层之后应用，优先级高于插件自带的默认值：
+
+`$DSH_HOME/profiles/desktop/cordis.patch.yml`
+（即 `~/.dsh/profiles/desktop/cordis.patch.yml`；Windows 是
+`C:\Users\<你>\.dsh\profiles\desktop\cordis.patch.yml`）
+
+```yaml
+- id: custom-search
+  name: dsh-custom-search
+  config:
+    engine: searxng
+    endpoint: http://127.0.0.1:8080
+    fallback: tavily
+    maxResults: 8
+    language: zh-CN
+    safeSearch: moderate
+```
+
+- **只写要改的字段**。没写的字段回落到 `Config` schema 的默认值（每个字段都有默认值）。
+- 改完**重启 Harness**。
+- 同一个 id 已存在于 profile patch 时改那一条，不要重复添加。
+
+> 注意 profile patch 是**整行替换 config**、不是深合并——但因为本插件每个字段都有 schema
+> 默认值，这里不需要像 `web` 那一行那样把所有字段都抄一遍。
+
+### 字段
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
@@ -162,20 +208,34 @@ fallback: tavily
 
 ## 回到官方搜索
 
-任选一种：
+**最省事**：在插件页把 `dsh-custom-search` 这个**组合包**整个关掉。它的 patch 层随之失效，
+那三行覆盖一起消失——`web` 的 `searchProvider` 回落、`web-search-deepseek` 不再被 `disabled`，
+官方搜索自动回来。
 
-- 设置 → 插件 里停用 `dsh-custom-search`，再到 设置 → 插件 → 插件配置 → `web`，
-  把 `searchProvider` 改回 `deepseek-official`，并把 `web-search-deepseek` 重新启用；
-- 或直接从 profile 的 `cordis.patch.yml`（`$DSH_HOME/profiles/desktop/cordis.patch.yml`）
-  删掉上面三行覆盖——profile patch 优先级比 bundle 高，能压过本插件。
+**想保留插件、只临时切回官方搜索**：在 profile 的 `cordis.patch.yml` 里加两条覆盖：
 
-卸载：
+```yaml
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: deepseek-official
+    fetchProvider: http        # 整行替换，必须复述，否则 web_fetch 失去后端
+
+- id: web-search-deepseek
+  name: '@deepseek-ai/dsh-web-search-deepseek'
+  disabled: false              # 必须放开，否则 pin 的提供方本身是关闭的
+```
+
+## 卸载
 
 ```bash
 dsh plugin --profile desktop remove dsh-custom-search
 ```
 
-`remove` 只删依赖、**不会回写 patch 层**，所以还要手工删掉上面那三行。
+`remove` 会连组合包一起摘掉，它携带的三行覆盖随之消失，**不需要**手工清理。
+
+要清理的是**你自己**写进 profile patch 的那些条目（见上面的「配置」）——组合包没了以后
+`id: custom-search` 寻址不到任何一行，会被静默跳过；留在文件里只是垃圾。
 
 ## 安全说明
 
@@ -188,6 +248,10 @@ dsh plugin --profile desktop remove dsh-custom-search
 
 ## 已知限制
 
+- **没有图形配置界面**，也没有「测试连接」按钮（原因见「配置」）。配置只能写在 profile 的 patch 层。
+  浏览器半侧是待补的下一步。
+- 因为没有可写 secret 的设置页，`apiKey` 要么直接写在 profile patch 里（明文，仅本机），
+  要么用 `apiKeyEnv` 指到环境变量。`ctx.credentials` 那条解析路径要等有写入界面才用得上。
 - `ctx.web` 的搜索请求只有 `query` 和 `maxResults` 两个参数，所以**没有**时间范围、域名过滤、
   站点限定这类 provider 级控制（这是服务层的既定边界，不是本插件的取舍）。
 - `search()` 是每次查询一次请求。`fallback` 里多个引擎串行尝试，最坏情况耗时是各超时之和。
