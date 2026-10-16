@@ -257,7 +257,7 @@ Loader 应用，不用重启。
 | `searchDepth` | `basic` | 仅 Tavily：`basic` / `advanced`（advanced 消耗更多额度） |
 | `maxResults` | `8` | 单次搜索最多返回多少条来源，上限 20 |
 | `timeoutMs` | `20000` | 单次搜索超时（毫秒） |
-| `language` | `zh-CN` | 语言/地区提示，各引擎会映射成自己的参数。**Brave 例外**：它只认 50 个固定标签（中文须写 `zh-hans` / `zh-hant`，日语是 `jp`、挪威语是 `nb`），本插件会自动换算；换算不出来的语言会**省略该参数并在连接报告里说明**，而不是发出去等 422 |
+| `language` | `zh-CN` | 语言/地区提示，各引擎会映射成自己的参数。**Brave 例外**：它的 `search_lang` 只认 50 个固定标签（中文须写 `zh-hans` / `zh-hant`，日语是 `jp`、挪威语是 `nb`），本插件会自动换算；换算不出来的语言会**省略该参数并在连接报告里说明**，而不是发出去等 422 |
 | `safeSearch` | `moderate` | `off` / `moderate` / `strict`，引擎不支持时忽略 |
 
 ### 各引擎怎么准备
@@ -552,9 +552,28 @@ smoke 报「未配置任何东西时也应自认可用」）。
 **探针那几项是同类问题的另一面。** 测试按钮要经 Remote 调用才能碰到宿主，而这个包没有构建步骤，
 `@deepseek-ai/dsh-typert-generator` 本该产出的那两份声明只能手写；**写错命名空间不会报错**，
 只会让面板安静地退回"只有本地检查"。所以校验脚本把两半对起来看：命名空间与包名、descriptor 的
-`id` / `service` / `namespace` / `method`、每个参数是否带 `strict` codec 标记（`$mount` 唯一的硬要求，
-它不执行 schema）、宿主方法的参数名与 descriptor 的 `wire`（源模式是从函数源码文本里解析参数名的，
+`id` / `service` / `namespace` / `method`、参数与结果的 codec 是否满足下面那三套校验器、宿主方法的参数名
+与 descriptor 的 `wire`（源模式是从函数源码文本里解析参数名的，
 所以不能有默认值、解构或 rest），以及原型标记键是否与 Gateway 读取的那个常量逐字相同。
+
+**探针的 codec 值得单独说，因为它让我猜错过两轮。** `$mount` 看起来是一道闸门，其实它后面还站着
+两道，三套校验器对「一个 strict codec 该长什么样」的要求并不一致：
+
+| 校验器 | 要求 |
+|---|---|
+| Gateway `requireStrictInputs` | 只看 `codec.mode !== 'strict'` |
+| Typert registry `validateCodec` | 另要求 `typeSymbol` 非空、`create` 是函数 |
+| Typert loader `requireStrictCodec` | 同上，且 `decode` / `encode` 若写了必须是函数 |
+
+只写裸 `{ mode: 'strict' }` 能过第一道、卡在第二道，而它报出来的是
+`Cannot read properties of undefined (reading 'length')` —— `validateNonempty` 去读
+`typeSymbol.length`，**一个字都不提是哪个字段**，所以看起来像个内部错误。`validate.mjs` 的
+`assertStrictCodec` 就是把这套要求就地转录成断言，下次 DSH 收紧规则能在离线套件里当场发现，
+而不是又靠用户截图。
+
+顺带说明 `create()` 产出的 schema 是**原样放行**：宿主给 SRC 来源的参数合成的是
+`codec.mode === 'src-json'`，而 `decode` 只在 `strict` 分支才取用 codec —— 这条路上工厂根本不会被
+调用，它只是为了让三道校验器都满意。
 `smoke.mjs` 补的是另一半，而且**两条路都跑真代码**：进程内 `register()` 一个 resolve hook
 （`dev/stubs/hooks.mjs`），只把它一个 specifier 顶替掉，于是 `installProbe` 真的挂载起来，
 探针出报告那一串（HTTP 状态、脱敏端点、往返耗时、每跳成败、密钥来源与引用名）才有东西可断言；
