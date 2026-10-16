@@ -32,19 +32,9 @@ DSH 把「联网搜索」拆成了三层，本插件只接管最底下那层：
 
 ## 安装
 
-**从 GitHub 安装**（推荐）
+**桌面端面板**（桌面端只有这一条路）
 
-```bash
-dsh plugin --profile desktop add github:Anixuil/dsh-custom-search#main
-```
-
-**从本地目录安装**（开发调试，改完重启即生效）
-
-```bash
-dsh plugin --profile desktop add <本仓库的绝对路径>
-```
-
-也可以走桌面端面板：在「+ 添加插件」里填本仓库的绝对路径或上面的 GitHub 地址。
+侧栏「插件」→「+ 添加插件」→ 填 `github:Anixuil/dsh-custom-search` → **安装** → **立即启用** → 重启 Harness。
 
 <p align="center">
   <img src="docs/install-from-github.png" width="400" alt="在桌面端「+ 添加插件」里填入 github:Anixuil/dsh-custom-search，被识别为「Git 仓库」来源">
@@ -59,25 +49,44 @@ dsh plugin --profile desktop add <本仓库的绝对路径>
 
 装完**重启 Harness** 才生效（bundle 类插件不会热加载）。桌面端用「重启 Harness」或退出重开。
 
-> `desktop` 是 DeepSeek Harness 桌面端的 profile 名（数据目录 `~/.dsh/profiles/desktop`）。
-> 如果你用的是 CLI 或其他 profile，换成实际名称，例如
+**改成从本地目录装**（自己改代码时用这个）
+
+同一栏填本仓库的绝对路径，例如 `D:\code\self\all\dsh-custom-search`。
+pnpm 把它记成 `link:` 而不是复制，所以此后改 `index.js` / `client.js`
+**只要重启 Harness 就生效**，不必卸载重装。改了代码要反复看效果时用这个，稳定了再换回 `github:`。
+
+**命令行安装**（需要单独装 CLI，桌面端不自带）
+
+```bash
+dsh plugin --profile desktop add github:Anixuil/dsh-custom-search#main
+```
+
+> DeepSeek Harness Desktop 的应用包没有声明 `bin`，也没有随附 `dsh` 可执行文件；
+> `dsh plugin` 来自单独安装的 CLI。只有桌面端的话，用上面面板那一栏，效果相同。
+
+> `desktop` 是桌面端的 profile 名（数据目录 `~/.dsh/profiles/desktop`）。
+> 用 CLI 或其他 profile 时换成实际名称，例如
 > `dsh plugin --profile web add github:Anixuil/dsh-custom-search#main`。
 
 > 本插件没有构建步骤，`github:` 源可以直装。若 pnpm 仍拦下构建脚本，
 > 在 `$DSH_HOME/profiles/desktop/pnpm-workspace.yaml` 的 `allowBuilds` 里放行 `dsh-custom-search`。
 
-### 升级：必须先卸载再装
+### 升级：必须卸载再装
 
-插件管理器**不提供升级**——它不列注册表版本，也没有更新按钮。改了版本要：
+插件管理器**不提供升级**——不列注册表版本，也没有更新按钮。而且 `pnpm-lock.yaml` 会把
+git 源解析出的 commit **钉死**（`resolution: {commit, type: git}`），所以后台也不会自己挪。
+
+面板里：**卸载**（要确认）→ 「+ 添加插件」填同一个 `github:` 地址 → 安装 → 立即启用 → 重启。
+
+命令行同理：
 
 ```bash
 dsh plugin --profile desktop remove dsh-custom-search
 dsh plugin --profile desktop add github:Anixuil/dsh-custom-search#main
 ```
 
-从面板装的话同理：卸载后用同一个 `github:` 地址再装一次。装完重启 Harness。
-
 > `github:` 源拉的是默认分支的当前提交，所以重装即拿到最新代码。
+> 要省掉反复重装，就按上面说的换成**本地目录**安装——之后只需重启。
 
 ### 兼容性
 
@@ -96,7 +105,8 @@ provider 契约（`ctx.web.registerSearchProvider` 与返回结构）是照着
 引擎还能用一排胶囊一键切换。点**保存**即写入 profile 的 patch 层并由 Loader 应用，不用重启。
 
 **API Key 不进设置文件**：它经凭证服务写入，引用名默认取该引擎约定的环境变量名
-（Brave 是 `BRAVE_API_KEY`）。填一次就持久保存，文件里只留引用名。
+（Brave 是 `BRAVE_API_KEY`），落点是 `~/.dsh/.credentials.yaml` 的 `refs:` 段——和模型 provider 的
+`VOLCENGINE_API_KEY` 并排。填一次就持久保存，profile patch 里只留引用名，**key 不会进版本库**。
 
 ### 没有界面时：直接改 profile 的 patch 层
 
@@ -222,11 +232,13 @@ fallback: tavily
 
 ## 卸载
 
+面板里点组合包卡片上的**卸载**（要确认）。用 CLI 的话：
+
 ```bash
 dsh plugin --profile desktop remove dsh-custom-search
 ```
 
-`remove` 会连组合包一起摘掉，它携带的三行覆盖随之消失，**不需要**手工清理。
+两条路都会连组合包一起摘掉，它携带的三行覆盖随之消失，**不需要**手工清理。
 
 要清理的是**你自己**写进 profile patch 的那些条目（见上面的「配置」）——组合包没了以后
 `id: custom-search` 寻址不到任何一行，会被静默跳过；留在文件里只是垃圾。
@@ -275,10 +287,15 @@ dsh-custom-search/
 
 ## 开发
 
+**装成本地目录**，之后改代码只需重启 Harness，不必反复卸载重装：
+面板「+ 添加插件」填本仓库的绝对路径，或
+
 ```bash
-# 本地目录直装，改完重启 Harness 生效
 dsh plugin --profile desktop add D:\code\self\all\dsh-custom-search
 ```
+
+本地目录是 `link:` 而不是复制，所以 `index.js`（宿主半侧）改完重启生效，
+`client.js`（浏览器半侧）改完重启后刷新页面即可。改稳定了再换回 `github:` 地址。
 
 新增一个搜索引擎 = 在 `engines.js` 的 `ENGINES` 里加一个条目，声明 `build` 和 `parse`，
 再到 `index.js` 的 `Config.engine` union 里加上这个 id，
