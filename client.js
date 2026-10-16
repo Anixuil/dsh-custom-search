@@ -74,6 +74,51 @@ window.__ModuleLoader__.load({
     const FALLBACK_KEY_REF = 'CUSTOM_SEARCH_API_KEY'
 
     /**
+     * Namespace — and Host service key — of the connectivity probe. Equals
+     * `PROBE_NAMESPACE` in `index.js`; spelled out on both sides because neither
+     * module can reach the other's constants.
+     */
+    const PROBE_NAMESPACE = 'customSearchProbe'
+
+    /** The one method that namespace exposes. */
+    const PROBE_METHOD = 'test'
+
+    /**
+     * The Host-for-Client contribution the probe is mounted from.
+     *
+     * This deployment selects Remote capabilities at build time, so a plugin
+     * that ships no generated `/remote` artifact cannot be added to that set.
+     * The Gateway's source-mode fallback covers exactly that case: the Host half
+     * declares a Remote marker on its service prototype, and this side hands the
+     * Gateway the descriptor describing the same endpoint.
+     *
+     * `$mount` validates that every parameter carries a strict codec *marker* —
+     * it never runs the codec, and the call itself sends positional JSON values
+     * keyed by `wire` — so `{ mode: 'strict' }` satisfies it on its own. A
+     * failure here is not fatal: the page falls back to its local checks.
+     */
+    const PROBE_CONTRIBUTION = {
+      package: 'dsh-custom-search',
+      descriptors: [
+        {
+          id: `dsh-custom-search#${PROBE_NAMESPACE}/${PROBE_METHOD}`,
+          service: PROBE_NAMESPACE,
+          namespace: PROBE_NAMESPACE,
+          method: PROBE_METHOD,
+          invocation: { kind: 'direct' },
+          parameters: [{ name: 'query', wire: 'query', source: 'json', codec: { mode: 'strict' } }],
+          result: { mode: 'strict' },
+        },
+      ],
+    }
+
+    /** Numeric bounds the Host half clamps to; the checks report rather than clamp. */
+    const MAX_RESULTS_CEILING = 20
+
+    /** Lowest timeout the Host half accepts. */
+    const MIN_TIMEOUT_MS = 1000
+
+    /**
      * Engine ids, their display labels, and the credential reference each one
      * reads when `apiKeyEnv` is left empty. Mirrors `engines.js` on the host
      * half; duplicated rather than imported because a client module cannot
@@ -156,6 +201,25 @@ window.__ModuleLoader__.load({
       save: '保存',
       saving: '保存中…',
       saveFailed: '本部署没有接受这些值，已保留供你修改。',
+      test: '测试连接',
+      testing: '测试中…',
+      testHint: '按当前配置发一次真实搜索，验证密钥和接口是否可用（消耗 1 次配额）。',
+      probeDirty: '有未保存的修改：上面的检查看的是当前输入，真实请求用的是已保存的配置。',
+      probeUnavailable: '宿主没有提供探针，只能做本地检查。',
+      probeOk: '{v} 返回 {n} 条结果，用时 {ms} ms。',
+      probeFail: '请求失败：{msg}',
+      chkEngineOk: '引擎：{v}',
+      chkEngineBad: '引擎无效：{v}',
+      chkKeyOk: '密钥：已配置（{v}）',
+      chkKeyMissing: '密钥：未配置（{v}），该引擎会直接报错',
+      chkKeyFree: '密钥：不需要，SearXNG 只要求接口地址可达',
+      chkEndpointOk: '接口地址：{v}',
+      chkEndpointBad: '接口地址不是合法的 http(s) 地址：{v}',
+      chkEndpointsBad: '按引擎的接口地址不是 JSON 对象，会被整个忽略',
+      chkFallbackOk: '兜底链：{v}',
+      chkFallbackBad: '兜底里有无法识别的引擎：{v}',
+      chkNumbersBad: '数值超出范围：{v}',
+      chkGoogleCxBad: 'Google CSE 还缺搜索引擎 ID（googleCx）',
     }
 
     /** English copy. */
@@ -197,6 +261,25 @@ window.__ModuleLoader__.load({
       save: 'Save',
       saving: 'Saving…',
       saveFailed: 'The deployment did not accept these values; they were left for you to correct.',
+      test: 'Test connection',
+      testing: 'Testing…',
+      testHint: 'Runs one real search with the current settings to prove the key and endpoint work (spends one quota unit).',
+      probeDirty: 'Unsaved edits: the checks above read your input, but the real request uses the saved settings.',
+      probeUnavailable: 'The Host exposed no probe, so only the local checks are available.',
+      probeOk: '{v} returned {n} source(s) in {ms} ms.',
+      probeFail: 'Request failed: {msg}',
+      chkEngineOk: 'Engine: {v}',
+      chkEngineBad: 'Unknown engine: {v}',
+      chkKeyOk: 'Credential: configured ({v})',
+      chkKeyMissing: 'Credential: not configured ({v}); this engine will fail outright',
+      chkKeyFree: 'Credential: not needed; SearXNG only needs a reachable endpoint',
+      chkEndpointOk: 'Endpoint: {v}',
+      chkEndpointBad: 'Endpoint is not a valid http(s) URL: {v}',
+      chkEndpointsBad: 'Per-engine endpoints are not a JSON object and would be ignored entirely',
+      chkFallbackOk: 'Fallback chain: {v}',
+      chkFallbackBad: 'Fallback names unknown engines: {v}',
+      chkNumbersBad: 'Value out of range: {v}',
+      chkGoogleCxBad: 'Google CSE also needs its search engine id (googleCx)',
     }
 
     /** Field name -> dictionary key suffix. */
@@ -252,6 +335,193 @@ window.__ModuleLoader__.load({
       if (typeof declared === 'string' && declared.trim().length > 0) return declared.trim()
       const engine = engineById(snapshot?.value?.engine)
       return (engine && engine.apiKeyEnv) || FALLBACK_KEY_REF
+    }
+
+    /**
+     * Whether the value parses as an absolute http(s) URL — what the Host half
+     * needs from an endpoint override.
+     * @param text - the candidate base URL.
+     * @returns whether the value would be usable.
+     */
+    function isHttpUrl(text) {
+      try {
+        const url = new URL(text)
+        return url.protocol === 'http:' || url.protocol === 'https:'
+      } catch {
+        return false
+      }
+    }
+
+    /**
+     * Parse the per-engine endpoint map the way the Host half does: malformed
+     * JSON is ignored rather than fatal, so the check only flags a string that
+     * would silently contribute nothing.
+     * @param text - the raw JSON text.
+     * @returns the parsed object, or undefined when it is not a JSON object.
+     */
+    function parseEndpointMap(text) {
+      let parsed
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        return undefined
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+      return parsed
+    }
+
+    /**
+     * Fill `{name}` placeholders from a plain object.
+     * @param template - the dictionary string.
+     * @param vars - replacements; missing names are left as written.
+     * @returns the final text.
+     */
+    function format(template, vars) {
+      return String(template).replace(/\{(\w+)\}/gu, (match, name) => (vars != null && name in vars ? String(vars[name]) : match))
+    }
+
+    /**
+     * Inspect the staged values the way the Host half reads them, with no
+     * network at all. The point is to name the mistakes a real request would
+     * otherwise only surface as an opaque vendor error — a stale engine id, a
+     * key that was never saved, a fallback that silently does nothing.
+     * @param value - the settings snapshot to inspect.
+     * @param credential - what the credentials domain last reported for this scope.
+     * @returns one entry per check, in display order.
+     */
+    function localChecks(value, credential) {
+      const rows = []
+      const settings = value ?? {}
+      const engine = engineById(settings.engine)
+      const engineText = String(settings.engine ?? '').trim()
+
+      rows.push(
+        engine === undefined
+          ? { level: 'bad', key: 'chkEngineBad', vars: { v: engineText.length > 0 ? engineText : '—' } }
+          : { level: 'ok', key: 'chkEngineOk', vars: { v: engine.label } },
+      )
+
+      if (engine !== undefined) {
+        if (engine.apiKeyEnv === null) {
+          // SearXNG is the one keyless engine: it needs a reachable endpoint, not a key.
+          rows.push({ level: 'info', key: 'chkKeyFree', vars: {} })
+        } else {
+          const ref = refOf({ value: settings })
+          rows.push(
+            credential?.configured === true
+              ? { level: 'ok', key: 'chkKeyOk', vars: { v: ref } }
+              : { level: 'bad', key: 'chkKeyMissing', vars: { v: ref } },
+          )
+        }
+      }
+
+      const endpoint = String(settings.endpoint ?? '').trim()
+      if (endpoint.length > 0) {
+        rows.push(
+          isHttpUrl(endpoint)
+            ? { level: 'ok', key: 'chkEndpointOk', vars: { v: endpoint } }
+            : { level: 'bad', key: 'chkEndpointBad', vars: { v: endpoint } },
+        )
+      }
+
+      const endpoints = String(settings.endpoints ?? '').trim()
+      if (endpoints.length > 0 && parseEndpointMap(endpoints) === undefined) {
+        rows.push({ level: 'bad', key: 'chkEndpointsBad', vars: {} })
+      }
+
+      const chain = String(settings.fallback ?? '')
+        .split(',')
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0)
+      if (chain.length > 0) {
+        const known = chain.filter((id) => engineById(id) !== undefined)
+        const unknown = chain.filter((id) => engineById(id) === undefined)
+        rows.push(
+          unknown.length === 0
+            ? { level: 'ok', key: 'chkFallbackOk', vars: { v: known.map((id) => engineById(id).label).join(' → ') } }
+            : { level: 'bad', key: 'chkFallbackBad', vars: { v: unknown.join(', ') } },
+        )
+      }
+
+      const outOfRange = []
+      if (typeof settings.maxResults === 'number' && (settings.maxResults < 1 || settings.maxResults > MAX_RESULTS_CEILING)) {
+        outOfRange.push(`maxResults=${settings.maxResults}`)
+      }
+      if (typeof settings.timeoutMs === 'number' && settings.timeoutMs < MIN_TIMEOUT_MS) {
+        outOfRange.push(`timeoutMs=${settings.timeoutMs}`)
+      }
+      if (outOfRange.length > 0) rows.push({ level: 'bad', key: 'chkNumbersBad', vars: { v: outOfRange.join(' / ') } })
+
+      if (engine?.id === 'google' && String(settings.googleCx ?? '').trim().length === 0) {
+        rows.push({ level: 'bad', key: 'chkGoogleCxBad', vars: {} })
+      }
+
+      return rows
+    }
+
+    /**
+     * The mounted probe namespace, or undefined when the Host did not accept the
+     * contribution. A Remote namespace is a child service of `remote`, reachable
+     * either as a property or by its dotted key — reading an unmounted one can
+     * throw instead of answering undefined, so both paths are guarded.
+     * @param ctx - the page plugin's context.
+     * @returns the namespace service, or undefined.
+     */
+    function probeOf(ctx) {
+      try {
+        const direct = ctx.remote?.[PROBE_NAMESPACE]
+        if (direct !== undefined && direct !== null) return direct
+      } catch {
+        /* not mounted as a reachable property */
+      }
+      try {
+        return ctx.get(`remote.${PROBE_NAMESPACE}`)
+      } catch {
+        return undefined
+      }
+    }
+
+    /**
+     * Mount the probe namespace, keeping the page working when the Host refuses
+     * it. The mount is asynchronous — descriptors are validated before any
+     * method becomes callable — so the panel treats a missing namespace as
+     * "local checks only" rather than an error.
+     * @param ctx - the page plugin's context.
+     */
+    function mountProbe(ctx) {
+      let dispose
+      let disposed = false
+
+      if (typeof ctx.remote?.$mount !== 'function') return
+
+      Promise.resolve()
+        .then(() => ctx.remote.$mount(PROBE_CONTRIBUTION))
+        .then((unmount) => {
+          if (disposed) {
+            try {
+              unmount?.()
+            } catch {
+              /* the namespace was already gone */
+            }
+            return
+          }
+          dispose = unmount
+        })
+        .catch(() => {
+          /* the Host declined the contribution; local checks remain */
+        })
+
+      ctx.effect(
+        () => () => {
+          disposed = true
+          try {
+            dispose?.()
+          } catch {
+            /* already unmounted with its fiber */
+          }
+        },
+        'dsh-custom-search: probe unmount',
+      )
     }
 
     /**
@@ -326,6 +596,7 @@ window.__ModuleLoader__.load({
       inject() {
         return {
           hooks: { customSearchCard: this.store },
+          testConnection: (query) => this.testConnection(query),
           ...this.form.actions(),
         }
       }
@@ -343,6 +614,71 @@ window.__ModuleLoader__.load({
         }
         await this.readCredential()
         return this.credential.configured
+      }
+
+      /**
+       * Answer "is what I configured actually usable?" in two passes: the local
+       * one reads the staged settings and the credentials domain synchronously
+       * and always succeeds; the Host one runs a real search through the
+       * provider the agent uses.
+       *
+       * The saved snapshot is what the Host will read, but the local pass also
+       * covers a pending draft, so an unsaved edit is reported rather than
+       * silently ignored.
+       * @param query - optional text to search for; blank uses the probe's own.
+       * @returns the report the card renders; never rejects.
+       */
+      async testConnection(query) {
+        const snapshot = this.scope.getSnapshot()
+        const staged = { ...(snapshot?.value ?? {}) }
+        for (const field of VALUE_FIELDS) {
+          const entry = this.form.field(field)
+          if (entry === undefined || typeof entry.text !== 'string') continue
+          const text = entry.text.trim()
+          if (NUMBER_FIELDS.includes(field)) {
+            // A blank or non-numeric box means "use the default", not NaN.
+            const parsed = Number(text)
+            staged[field] = text.length === 0 || Number.isNaN(parsed) ? undefined : parsed
+          } else {
+            staged[field] = text
+          }
+        }
+
+        const report = {
+          local: localChecks(staged, this.credential),
+          dirty: this.form.shell().dirty === true,
+          remote: { status: 'unavailable' },
+        }
+        const probe = probeOf(this.ctx)
+        if (probe === undefined || typeof probe[PROBE_METHOD] !== 'function') return report
+
+        report.remote = { status: 'running' }
+        let answer
+        try {
+          answer = await probe[PROBE_METHOD](String(query ?? ''))
+        } catch (error) {
+          report.remote = { status: 'failed', message: error instanceof Error ? error.message : String(error) }
+          return report
+        }
+
+        // A Remote call resolves to { ok, value } / { ok, error } and never
+        // rejects for a carrier problem, so both branches are ordinary outcomes.
+        if (answer?.ok !== true) {
+          report.remote = { status: 'failed', message: String(answer?.error?.message ?? 'unreachable') }
+          return report
+        }
+
+        const value = answer.value ?? {}
+        report.remote = {
+          status: value.ok === true ? 'ok' : 'failed',
+          count: value.count ?? 0,
+          elapsedMs: value.elapsedMs ?? 0,
+          engineLabel: value.engineLabel,
+          chain: Array.isArray(value.chain) ? value.chain : [],
+          sources: Array.isArray(value.sources) ? value.sources : [],
+          message: value.error,
+        }
+        return report
       }
 
       /** Release the form's subscriptions. */
@@ -415,6 +751,119 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Leading glyph per check level. Text rather than colour so the panel reads
+     * the same in either theme, and rather than an icon component so it cannot
+     * break on a primitive this deployment does not ship.
+     */
+    const MARK = { ok: '✓', bad: '✗', warn: '!', info: '·' }
+
+    /**
+     * One local check line.
+     * @param row - the check entry.
+     * @param t - the page's locale reader.
+     * @returns the list item.
+     */
+    function checkLine(row, t) {
+      return React.createElement(
+        'li',
+        {
+          key: `check-${row.key}`,
+          style: { margin: '3px 0', opacity: row.level === 'ok' || row.level === 'info' ? 0.75 : 1 },
+        },
+        `${MARK[row.level] ?? '·'} ${format(t(row.key), row.vars)}`,
+      )
+    }
+
+    /**
+     * The line describing the real request, in any of its four states.
+     * @param remote - the report's `remote` field.
+     * @param t - the page's locale reader.
+     * @returns the list item.
+     */
+    function remoteLine(remote, t) {
+      const style = { margin: '8px 0 0' }
+
+      if (remote === undefined || remote.status === 'running' || remote.status === 'unavailable') {
+        return React.createElement('li', { key: 'probe', style: { ...style, opacity: 0.6 } }, `· ${t('probeUnavailable')}`)
+      }
+
+      if (remote.status === 'failed') {
+        return React.createElement(
+          'li',
+          { key: 'probe', style },
+          `✗ ${format(t('probeFail'), { msg: String(remote.message ?? '') })}`,
+        )
+      }
+
+      const children = [
+        React.createElement(
+          'span',
+          { key: 'head' },
+          `✓ ${format(t('probeOk'), { n: remote.count ?? 0, ms: remote.elapsedMs ?? 0, v: String(remote.engineLabel ?? '') })}`,
+        ),
+      ]
+      for (const [index, source] of (remote.sources ?? []).entries()) {
+        children.push(
+          React.createElement(
+            'div',
+            { key: `source-${index}`, style: { margin: '4px 0 0 14px', opacity: 0.7 } },
+            `${index + 1}. ${String(source?.title || source?.url || '')}`,
+          ),
+        )
+      }
+      return React.createElement('li', { key: 'probe', style }, children)
+    }
+
+    /**
+     * The connectivity panel: one button, and whatever the last run reported.
+     *
+     * It owns its own state rather than staging through the settings scope: a
+     * probe result is not a setting, and keeping it out of the scope means
+     * pressing the button never marks the form dirty.
+     * @param props - the page's actions and locale reader.
+     * @returns the panel.
+     */
+    function connectionPanel(props) {
+      const t = props.t
+      const [report, setReport] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+
+      const run = () => {
+        if (busy) return
+        setBusy(true)
+        setReport(null)
+        Promise.resolve()
+          .then(() => props.testConnection(''))
+          .then((next) => setReport(next))
+          .catch((error) => setReport({ local: [], remote: { status: 'failed', message: error?.message ?? String(error) } }))
+          .then(() => setBusy(false))
+      }
+
+      const items = []
+      if (report !== null) {
+        for (const row of report.local ?? []) items.push(checkLine(row, t))
+        if (report.dirty === true) {
+          items.push(
+            React.createElement('li', { key: 'dirty', style: { margin: '3px 0', opacity: 0.75 } }, `! ${t('probeDirty')}`),
+          )
+        }
+        items.push(remoteLine(report.remote, t))
+      }
+
+      return React.createElement('div', { key: 'probe', style: { margin: '6px 0 18px' } }, [
+        React.createElement('p', { key: 'caption', style: { margin: '0 0 6px', opacity: 0.7 } }, t('testHint')),
+        React.createElement(
+          UI.Button,
+          { key: 'run', onClick: run, disabled: busy === true || !state?.writable },
+          busy ? t('testing') : t('test'),
+        ),
+        items.length > 0
+          ? React.createElement('ul', { key: 'items', style: { margin: '10px 0 0', padding: 0, listStyle: 'none', fontSize: '0.92em' } }, items)
+          : null,
+      ])
+    }
+
+    /**
      * Render this row's config page, as the Plugins page asks.
      * @param props - the view asked for, this page's copy, the form snapshot, and its actions.
      * @returns the one-liner, or the form.
@@ -454,6 +903,9 @@ window.__ModuleLoader__.load({
           valueField(props, state, 'timeoutMs', true),
           valueField(props, state, 'language', false),
           valueField(props, state, 'safeSearch', false),
+          // Guarded because the injected face is what carries the probe: a card
+          // rendered from a registration without it stays a plain form.
+          typeof props.testConnection === 'function' ? connectionPanel(props, state) : null,
         ],
       )
     }
@@ -504,6 +956,10 @@ window.__ModuleLoader__.load({
         'dsh-custom-search: form subscription',
       )
 
+      // Best effort: a deployment whose Gateway refuses the contribution still
+      // renders the form, and the panel says only local checks are available.
+      mountProbe(ctx)
+
       mount(
         ctx,
         card,
@@ -520,6 +976,9 @@ window.__ModuleLoader__.load({
     exports.ITEM_SLOT = ITEM_SLOT
     exports.ROW_SLOT = ROW_SLOT
     exports.ITEM_ID = ITEM_ID
+    exports.PROBE_NAMESPACE = PROBE_NAMESPACE
+    exports.PROBE_METHOD = PROBE_METHOD
+    exports.PROBE_CONTRIBUTION = PROBE_CONTRIBUTION
     exports.apply = apply
     exports.inject = inject
     return module.exports

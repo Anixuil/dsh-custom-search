@@ -5,6 +5,10 @@
  * drives the real plugin module through a stub `ctx.web`, and asserts the
  * provider contract the seam relies on.
  *
+ * The last case pins the degraded path of the settings page's connectivity
+ * probe: with no Typert package installed the probe must bow out without
+ * disturbing the provider — which is the state this checkout is in.
+ *
  * Imports the plugin by its real path, so there is no copy to keep in sync.
  */
 import http from 'node:http'
@@ -215,6 +219,22 @@ await assert.rejects(
   (error) => /cx/.test(error.message),
 )
 ok('Google CSE 缺 cx 时给出明确提示')
+
+// 14. The settings page's connectivity probe is optional. This environment has
+// no Typert package, which is exactly the degraded case: installProbe must bow
+// out quietly and apply() must still register the provider and hand back its
+// disposer, rather than throwing or returning undefined.
+let sawProvider = false
+const noTypertCtx = {
+  web: { registerSearchProvider: () => { sawProvider = true; return () => {} } },
+  get: () => undefined,
+}
+const dispose = plugin.apply(noTypertCtx, refs(BASE))
+assert.equal(typeof dispose, 'function', 'apply 必须返回 registerSearchProvider 的 disposer')
+assert.equal(sawProvider, true)
+// Give the async probe attempt a chance to reject before the process moves on.
+await new Promise((resolve) => setTimeout(resolve, 0))
+ok('Typert 包缺失时 apply 仍注册 provider 并返回 disposer（探针可选）')
 
 server.close()
 

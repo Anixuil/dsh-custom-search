@@ -337,6 +337,8 @@ const scopeStub = {
 }
 
 const registrations = []
+const mountCalls = []
+const unmountCalls = []
 const fakeCtx = {
   locale: { bind: () => (key) => key, register: () => () => {} },
   effect: (run) => run(),
@@ -356,7 +358,12 @@ const fakeCtx = {
       describe: async () => ({ ok: true, value: {} }),
       set: async () => ({ ok: true }),
     },
+    $mount: (contribution) => {
+      mountCalls.push(contribution)
+      return Promise.resolve(() => { unmountCalls.push(contribution) })
+    },
   },
+  get: () => undefined,
 }
 
 let loaded
@@ -373,6 +380,9 @@ const mod = loaded.factory((spec) => {
   throw new Error(`client.js require("${spec}") 未被 stub 覆盖`)
 })
 mod.apply(fakeCtx)
+// Mounting the probe settles on a microtask, so let it land before the probe
+// assertions below read what apply() did.
+await new Promise((resolve) => setTimeout(resolve, 0))
 ok('client.js 的 apply(ctx) 能在 stub 上下文里跑完')
 
 assert.equal(registrations.length, 2, `apply 应给两个槽各注册一次，实际 ${registrations.length} 次`)
@@ -488,5 +498,103 @@ const zhKeys = dictKeys('zh')
 const enKeys = dictKeys('en')
 assert.deepEqual([...zhKeys].sort(), [...enKeys].sort(), 'zh 与 en 词典的键必须一一对应')
 ok(`zh / en 词典键对齐（各 ${zhKeys.size} 条）`)
+
+// --- test-connection probe: the two hand-written declarations -------------
+// The panel reaches the Host's probe through a Remote call. Neither half can
+// generate its declaration — this package has no build step — so both are
+// written by hand, and nothing at runtime cross-checks them: a namespace typo
+// leaves the panel quietly reporting "local checks only". These assertions are
+// that cross-check.
+const indexSrc = read('index.js')
+const pluginModule = await import('../index.js')
+const contribution = mod.PROBE_CONTRIBUTION
+
+assert.ok(contribution, 'client.js 必须导出 PROBE_CONTRIBUTION')
+assert.equal(contribution.package, pkg.name, 'contribution.package 决定贡献归属，必须等于包名')
+assert.equal(
+  mod.PROBE_NAMESPACE,
+  pluginModule.PROBE_NAMESPACE,
+  `两半的探针命名空间必须一致（宿主侧是 ${pluginModule.PROBE_NAMESPACE}）`,
+)
+ok(`探针命名空间两半一致（${mod.PROBE_NAMESPACE}）`)
+
+const descriptors = contribution.descriptors ?? []
+assert.equal(descriptors.length, 1, 'contribution 只描述一个方法')
+const probeDescriptor = descriptors[0]
+assert.equal(probeDescriptor.namespace, pluginModule.PROBE_NAMESPACE, 'descriptor.namespace 与宿主服务键不一致')
+assert.equal(probeDescriptor.service, pluginModule.PROBE_NAMESPACE, 'descriptor.service 指向的宿主服务名不一致')
+assert.equal(probeDescriptor.method, mod.PROBE_METHOD, 'descriptor.method 与导出的方法名不一致')
+assert.equal(probeDescriptor.invocation?.kind, 'direct', '源模式发现只支持 kind: direct 的直达方法')
+assert.equal(
+  probeDescriptor.id,
+  `${pkg.name}#${pluginModule.PROBE_NAMESPACE}/${mod.PROBE_METHOD}`,
+  'descriptor.id 必须形如 <包名>#<命名空间>/<方法>',
+)
+
+// `$mount` refuses the whole contribution when a parameter lacks a strict codec
+// marker. It never runs that codec — the call sends positional JSON keyed by
+// `wire` — so the marker is the entire contract.
+assert.equal(probeDescriptor.parameters?.length, 1, '探针有一个业务参数：搜索词')
+const probeParameter = probeDescriptor.parameters[0]
+assert.equal(probeParameter.codec?.mode, 'strict', '$mount 要求每个参数都带 strict codec 标记')
+assert.equal(probeParameter.source, 'json', '搜索词按位置传 JSON，source 必须是 json')
+assert.equal(probeParameter.wire, probeParameter.name, 'wire 与 name 相同：源模式按名字装 args')
+ok('探针 descriptor 满足 $mount 的形状要求（直达 / strict codec / id 形式）')
+
+// The wire name must equal the Host method's own parameter name: source-mode
+// discovery derives the parameter list from that function's source text, and
+// rejects defaults, destructuring and rest parameters outright.
+const hostSignature = indexSrc.match(/async\s+test\s*\(([^)]*)\)/u)
+assert.ok(hostSignature, 'index.js 里找不到探针方法 async test(...)')
+const hostParams = hostSignature[1].split(',').map((part) => part.trim()).filter((part) => part.length > 0)
+assert.ok(
+  hostParams.length > 0 && hostParams.every((name) => /^[$A-Z_a-z][$\w]*$/u.test(name)),
+  `探针方法参数必须是简单标识符（无默认值/解构/rest），实际是「${hostSignature[1]}」`,
+)
+assert.deepEqual(hostParams, [probeParameter.name], `宿主方法参数名与 descriptor 不一致（宿主：${hostParams.join(', ')}）`)
+ok(`宿主方法参数名与 descriptor 一致（${hostParams.join(', ')}）`)
+
+// The prototype marker is what source-mode discovery actually reads.
+assert.equal(
+  pluginModule.PROBE_MARKER_KEY,
+  '@deepseek-ai/dsh-typert-protocol/remote-methods',
+  '原型标记键必须与 Gateway 读取的常量逐字相同',
+)
+const marker = pluginModule.PROBE_METHODS.find((entry) => entry.method === mod.PROBE_METHOD)
+assert.ok(marker, `PROBE_METHODS 里缺少 ${mod.PROBE_METHOD} 的标记`)
+assert.equal(marker.invocation?.kind, 'direct', '标记的 invocation.kind 必须与 descriptor 一致')
+ok('宿主侧 Remote 标记与页面侧 descriptor 描述同一个端点')
+
+// The probe rides the Remote service, so the page must declare that dependency
+// and actually hand the contribution over.
+assert.ok(mod.inject.includes('remote'), 'inject 必须含 remote：$mount 挂在它上面')
+assert.equal(mountCalls.length, 1, `apply 应把探针交给 remote.$mount 恰好一次，实际 ${mountCalls.length} 次`)
+assert.equal(mountCalls[0]?.package, pkg.name, '$mount 收到的是本包的 contribution')
+ok('apply 把探针 contribution 交给 remote.$mount')
+
+// A key used by the page but missing from a dictionary renders as its raw name
+// in that language — how a half-translated panel shows up.
+const valueFields = [
+  ...listOf(clientSrc.match(/TEXT_FIELDS\s*=\s*\[([\s\S]*?)\]/u)),
+  ...listOf(clientSrc.match(/NUMBER_FIELDS\s*=\s*\[([\s\S]*?)\]/u)),
+]
+const labelKeys = new Set(
+  [...(clientSrc.match(/LABEL_OF\s*=\s*\{([\s\S]*?)\n {4}\}/u)?.[1] ?? '').matchAll(/:\s*'([A-Za-z]\w*)'/gu)].map((m) => m[1]),
+)
+const usedKeys = new Set([
+  ...[...clientSrc.matchAll(/\bt\(\s*'([A-Za-z]\w*)'\s*\)/gu)].map((m) => m[1]),
+  ...[...clientSrc.matchAll(/key:\s*'(chk[A-Za-z]\w*)'/gu)].map((m) => m[1]),
+])
+for (const field of valueFields) {
+  const cap = `${field.charAt(0).toUpperCase()}${field.slice(1)}`
+  assert.ok(labelKeys.has(`label${cap}`), `字段 ${field} 在 LABEL_OF 里没有 label 键`)
+  usedKeys.add(`label${cap}`)
+  usedKeys.add(`hint${cap}`)
+}
+for (const key of usedKeys) {
+  assert.ok(zhKeys.has(key), `client.js 用到词典键 "${key}"，但 zh 词典里没有`)
+  assert.ok(enKeys.has(key), `client.js 用到词典键 "${key}"，但 en 词典里没有`)
+}
+ok(`client.js 引用的 ${usedKeys.size} 个词典键在 zh / en 中都存在`)
 
 console.log(`\n全部 ${checked.length} 项清单校验通过。`)

@@ -12,6 +12,12 @@
  *
  * The model-facing `web_search` tool keeps its name and schema, so nothing about
  * the agent's prompt or tool list changes when this provider takes over.
+ *
+ * The second export is optional: a Remote probe the settings page calls to run
+ * one real search through the very provider the agent uses, so "did my key
+ * work?" has an answer that does not require asking the model. See
+ * `installProbe` — a deployment without the Typert packages simply loses the
+ * probe and keeps the provider.
  */
 
 import z from '@deepseek-ai/schemastery'
@@ -25,6 +31,41 @@ export const inject = ['web']
 
 /** Stable id this provider registers under; `dsh-web` pins it via `searchProvider`. */
 export const PROVIDER_ID = 'custom-search'
+
+/**
+ * Cordis service key — and wire namespace — of the connectivity probe.
+ * `client.js` spells the same name; the two halves are separate modules, so
+ * neither can read the other's constants.
+ */
+export const PROBE_NAMESPACE = 'customSearchProbe'
+
+/**
+ * Prototype key `@deepseek-ai/dsh-typert-protocol` stores Remote method markers
+ * under. That package exports the decorators and the reader but not this
+ * constant, and the Gateway's source-mode discovery reads the marker straight
+ * off the prototype, so it has to be spelled out here.
+ */
+export const PROBE_MARKER_KEY = '@deepseek-ai/dsh-typert-protocol/remote-methods'
+
+/** Marker descriptor version the Gateway's reader accepts; it refuses any other. */
+const PROBE_MARKER_VERSION = 1
+
+/**
+ * Remote method markers the Gateway's source-mode discovery reads off the probe
+ * prototype. Exported so the offline validator can hold them against the
+ * browser-side descriptor without a Typert installation present.
+ *
+ * `method` must name a prototype method — the Gateway derives the wire
+ * parameter names from that function's own source — which is why the probe
+ * spells it `async test(query)`: an identifier list, with no defaults,
+ * destructuring or rest parameter.
+ */
+export const PROBE_METHODS = Object.freeze([
+  Object.freeze({ method: 'test', invocation: Object.freeze({ kind: 'direct' }) }),
+])
+
+/** How many sources a probe reports; enough to prove the pipeline, cheap on quota. */
+const PROBE_RESULT_LIMIT = 3
 
 /** Hard ceiling on how many sources one search may hand back to the seam. */
 const MAX_RESULTS_LIMIT = 20
@@ -262,6 +303,96 @@ class CustomSearchProvider {
   }
 }
 
+/**
+ * Build and register the Host-for-Client probe the settings page calls.
+ *
+ * A settings page reaches a Host capability through a Remote call, and this
+ * deployment selects Remote capabilities at build time — a plugin shipping no
+ * generated `/remote` artifact cannot be one of them. The Gateway's source-mode
+ * fallback closes that gap: it discovers a service whose prototype carries a
+ * Remote method marker. A package with no build step has no generator to emit
+ * those two declarations, so they are written by hand here, and `client.js`
+ * carries the matching browser-side descriptor.
+ *
+ * Two boundaries make this safe to attempt unconditionally: the Typert packages
+ * are imported lazily, so a deployment without them keeps the provider; and the
+ * probe answers rather than throws, so the page always has something to render.
+ *
+ * @param ctx - the plugin context; the service unregisters with its fiber.
+ * @param provider - the live provider, so a probe exercises the agent's own path.
+ * @returns whether the probe was installed.
+ */
+async function installProbe(ctx, provider) {
+  let Base
+  try {
+    ({ TypertRemoteService: Base } = await import('@deepseek-ai/dsh-typert-protocol'))
+  } catch {
+    return false
+  }
+  if (typeof Base !== 'function') return false
+
+  class CustomSearchProbe extends Base {
+    /**
+     * @param context - the context whose fiber owns the service registration.
+     */
+    constructor(context) {
+      super(context, PROBE_NAMESPACE)
+    }
+
+    /**
+     * Run one real search down the configured engine chain and report what
+     * happened — including the failures.
+     *
+     * Deliberately not a wrapper that rethrows: the page shows `error` verbatim,
+     * and the provider's own message already names every engine it tried and why
+     * each one failed, which is exactly what a user debugging a key needs.
+     *
+     * @param query - text to search for; blank falls back to a fixed probe.
+     * @returns a plain report; every field is lossless JSON.
+     */
+    async test(query) {
+      const options = provider.snapshot()
+      const text = nonEmpty(query) ? String(query).trim().slice(0, 200) : 'deepseek'
+      const started = Date.now()
+      const report = {
+        query: text,
+        engine: options.engine,
+        engineLabel: engineLabel(options.engine),
+        chain: buildChain(options).map((id) => engineLabel(id)),
+        ok: false,
+        count: 0,
+        sources: [],
+        elapsedMs: 0,
+      }
+
+      try {
+        const { sources } = await provider.search({ query: text, maxResults: PROBE_RESULT_LIMIT })
+        report.count = sources.length
+        report.ok = sources.length > 0
+        report.sources = sources.slice(0, PROBE_RESULT_LIMIT).map((source) => ({
+          title: String(source?.title ?? ''),
+          url: String(source?.url ?? ''),
+        }))
+      } catch (error) {
+        report.error = describe(error)
+      }
+
+      report.elapsedMs = Date.now() - started
+      return report
+    }
+  }
+
+  Object.defineProperty(CustomSearchProbe.prototype, PROBE_MARKER_KEY, {
+    configurable: true,
+    value: Object.freeze({ version: PROBE_MARKER_VERSION, methods: PROBE_METHODS }),
+  })
+
+  // Constructing a Service registers it on the calling fiber, so the probe
+  // disappears with the plugin.
+  new CustomSearchProbe(ctx)
+  return true
+}
+
 export function apply(ctx, config) {
   const snapshot = () => ({
     engine: config.engine.get(),
@@ -278,6 +409,12 @@ export function apply(ctx, config) {
     safeSearch: config.safeSearch.get(),
   })
 
+  const provider = new CustomSearchProvider(ctx, snapshot)
+
+  // Optional, and never allowed to break the provider: a refused probe costs the
+  // settings page its connectivity button and nothing else.
+  void installProbe(ctx, provider).catch(() => {})
+
   // Registered with the calling fiber, so the provider unregisters on dispose.
-  return ctx.web.registerSearchProvider(new CustomSearchProvider(ctx, snapshot))
+  return ctx.web.registerSearchProvider(provider)
 }

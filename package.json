@@ -1,6 +1,6 @@
 {
   "name": "dsh-custom-search",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Replace the built-in DeepSeek web search with a configurable engine (SearXNG / Tavily / Exa / Brave / Serper / Bing / Google CSE).",
   "license": "MIT",
   "author": "Anixuil",

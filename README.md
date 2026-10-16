@@ -118,6 +118,22 @@ Loader 应用，不用重启。
 （Brave 是 `BRAVE_API_KEY`），落点是 `~/.dsh/.credentials.yaml` 的 `refs:` 段——和模型 provider 的
 `VOLCENGINE_API_KEY` 并排。填一次就持久保存，profile patch 里只留引用名，**key 不会进版本库**。
 
+### 测一下配好没有
+
+表单最下面有个**测试连接**按钮，点一下就知道"我配的到底能不能用"。它分两层：
+
+1. **本地检查**（不联网，立即出结果）：引擎 id 是否有效、这个引擎要不要 key、key **到底配上了没有**
+   （问凭证服务，不是看输入框）、`endpoint` 是否是合法的 http(s) 地址、兜底链里有没有拼错的引擎、
+   数值有没有越界。这些正是真实请求只会回一个含糊厂商错误的地方。
+2. **真实请求**：用**已保存的配置**走一遍 agent 实际使用的 provider，真跑一次搜索，报回引擎名、
+   结果条数、耗时和前三条标题。**会消耗 1 次搜索配额。**
+
+结果按 `✓ / ✗ / !` 逐条列出。表单里有未保存的改动时会另行提示——本地检查看的是你的输入，
+真实请求用的是已保存的配置。
+
+> **界面上没有这个按钮**，说明宿主没接受探针（例如部署里没挂 Typert 包），此时只剩本地检查。
+> 这是有意的降级：探针**永远不影响搜索本身**，最多就是少一个按钮。
+
 ### 没有界面时：直接改 profile 的 patch 层
 
 `$DSH_HOME/profiles/desktop/cordis.patch.yml` 在所有 bundle 层之后应用，优先级高于插件自带的默认值：
@@ -321,8 +337,12 @@ rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-custom-search
 
 ## 已知限制
 
-- **没有「测试连接」按钮**。表单只做暂存与写入校验，不会去探测引擎是否可达；
-  配错了表现为搜索报错，不是表单报错。
+- **「测试连接」的探测层可能缺席**。本地检查（字段合法性、凭证状态，不联网）永远可用；
+  「真实请求」要经 Remote 调用到宿主，靠 Typert 的源模式发现，宿主没挂载那套包时只剩本地检查。
+  两条路都**不影响搜索本身**——最坏情况是少一个按钮。
+- 探针走的是 Typert 的**源模式兜底**（手写 descriptor + 原型标记），因为本包没有构建步骤、
+  产不出 `dsh-typert-generator` 的那两份文件。这是 DSH 的内部机制，大版本升级后可能要跟着调；
+  调不动时的表现同样是按钮消失，而不是搜索坏掉。
 - **换引擎不会迁移密钥**。`apiKeyEnv` 留空时引用名跟着主引擎走（`brave` → `BRAVE_API_KEY`），
   所以从 Brave 换到 Tavily 要在表单里另填一个 key；旧的那个仍留在凭证服务里。
 - `engine` 在 schema 里是 `union`，表单上是文本框 + 一排胶囊。填了 union 之外的值**保存会失败**，
@@ -338,8 +358,8 @@ rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-custom-search
 
 ```
 dsh-custom-search/
-├── index.js          宿主半侧：Config schema、provider 注册、凭证解析、兜底链
-├── client.js         浏览器半侧：插件页的配置表单（plugins.row.config）
+├── index.js          宿主半侧：Config schema、provider 注册、凭证解析、兜底链、连通性探针
+├── client.js         浏览器半侧：插件页的配置表单（两个入口）与「测试连接」按钮
 ├── engines.js        引擎适配表：每个引擎的 build（怎么发请求）+ parse（怎么读响应）
 ├── cordis.patch.yml  组合包 patch：1 行 insert（本插件的行）+ 2 条对既有行的覆盖
 ├── package.json      dsh.bundle.patch + dsh.client 声明、icon、locale、files 白名单
@@ -347,8 +367,8 @@ dsh-custom-search/
 ├── icon.svg
 ├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
-    ├── smoke.mjs        13 项：provider 契约、归一化、去重、兜底、取消、错误码
-    ├── validate.mjs     33 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、浏览器半侧的契约与实跑
+    ├── smoke.mjs        14 项：provider 契约、归一化、去重、兜底、取消、错误码、探针缺省时的降级
+    ├── validate.mjs     39 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、浏览器半侧的契约与实跑、探针两端一致性
     ├── bundle-rows.mjs  对着任一份 patch 复现卸载判据（bundle-in-use），非本包的行会标出来
     └── asar.py          从 DSH 安装包里抽源码/依赖的解析脚本
 ```
@@ -377,7 +397,7 @@ dsh plugin --profile desktop add D:\code\self\all\dsh-custom-search
 ```bash
 cd dev
 node smoke.mjs      # 起本地 mock server，用 stub ctx.web 驱动真实插件模块
-node validate.mjs   # 清单、patch 方言、patch 与 Config 对齐，以及浏览器半侧的契约
+node validate.mjs   # 清单、patch 方言、两端声明一致性，以及浏览器半侧的契约
 node bundle-rows.mjs <某份 cordis.patch.yml>   # 复现宿主的卸载判据，定位「卸不掉」
 ```
 
@@ -389,6 +409,15 @@ node bundle-rows.mjs <某份 cordis.patch.yml>   # 复现宿主的卸载判据�
 插件行就只剩启停开关，界面上没有任何报错。
 
 （把它写成实跑而不是正则断言，是因为"注册到底发生了没有"这件事，只有跑一遍才答得准。）
+
+**探针那几项是同类问题的另一面。** 测试按钮要经 Remote 调用才能碰到宿主，而这个包没有构建步骤，
+`@deepseek-ai/dsh-typert-generator` 本该产出的那两份声明只能手写；**写错命名空间不会报错**，
+只会让面板安静地退回"只有本地检查"。所以校验脚本把两半对起来看：命名空间与包名、descriptor 的
+`id` / `service` / `namespace` / `method`、每个参数是否带 `strict` codec 标记（`$mount` 唯一的硬要求，
+它不执行 schema）、宿主方法的参数名与 descriptor 的 `wire`（源模式是从函数源码文本里解析参数名的，
+所以不能有默认值、解构或 rest），以及原型标记键是否与 Gateway 读取的那个常量逐字相同。
+`smoke.mjs` 补的是另一半：本机没有 Typert 包，正好是降级场景，断言 `apply` 照常注册 provider
+并返回 disposer，探针缺席不牵连搜索。
 
 行归属那几项同理：脚本会照 `applyEntryPatches` 的语义把各层合成一遍，断言
 `insert:` 里只有本包自己的行、合成后 `web` / `web-search-deepseek` 各只有一份。
