@@ -23,6 +23,7 @@ register('./stubs/hooks.mjs', import.meta.url)
 
 const plugin = await import('../index.js')
 const stub = await import('./stubs/typert-protocol.js')
+const { ENGINES } = await import('../engines.js')
 
 const calls = []
 const server = http.createServer((req, res) => {
@@ -178,10 +179,36 @@ ok(`provider 契约完整（id=${provider.id}）`)
 assert.equal(provider.available(), true)
 ok('searxng 免 key 时 available() = true')
 
-// 3. Keyed engine without a key is unavailable (cheap, offline check)
+// 3. Availability is an offline claim, and it stays honest in the only
+// direction it can. The seam resolves the configured provider with a
+// SYNCHRONOUS `available()` (dsh-web's `resolveProvider`), so asking the
+// credentials service — the documented home for a key, and asynchronous —
+// is not an option; gating on a live `process.env` value instead is how a
+// working provider came to be refused with WEB_PROVIDER_CONFIGURED_UNAVAILABLE
+// while its settings page reported the key as configured. A declared reference
+// counts as a resolver, for every keyed engine, and the cost is that a missing
+// key must fail at search time — which it does, naming the engine and the
+// reference, without a single request leaving the process.
+delete process.env.TAVILY_API_KEY
+for (const id of Object.keys(ENGINES)) {
+  assert.equal(
+    mount({ engine: id }).available(),
+    true,
+    `${id} 未配置任何东西时也应自认可用（引用即解析器）`,
+  )
+}
 const keyed = mount({ engine: 'tavily' })
-assert.equal(keyed.available(), false)
-ok('tavily 未配置 key 时 available() = false（未发网络请求）')
+const beforeKeylessQuery = calls.length
+await assert.rejects(
+  () => keyed.search({ query: 'no-key-anywhere' }, undefined),
+  (error) => {
+    assert.match(error.message, /Tavily/)
+    assert.match(error.message, /TAVILY_API_KEY/)
+    return true
+  },
+)
+assert.equal(calls.length, beforeKeylessQuery, '缺 key 时不应发出任何请求')
+ok('免 key 与需 key 引擎都自认可用（离线判据不查凭证服务）；缺 key 在搜索时按引擎+引用名报错')
 
 // 4. SearXNG search normalizes, dedupes, drops non-http urls
 const searx = await provider.search({ query: 'hello', maxResults: 5 }, undefined)

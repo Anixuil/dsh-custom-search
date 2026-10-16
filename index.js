@@ -238,12 +238,23 @@ class CustomSearchProvider {
     if (engine === undefined) return false
     if (!Number.isInteger(options.timeoutMs) || options.timeoutMs < 1000) return false
     if (engine.keyless === true) return true
-    if (nonEmpty(options.apiKey) || nonEmpty(options.apiKeyEnv)) return true
-    // A declared reference proves a resolver exists; a live environment variable
-    // proves a value does. Both checks stay synchronous and offline — the seam
-    // calls `available()` during provider selection and forbids network I/O there.
-    const reference = engine.apiKeyEnv
-    return reference !== null && nonEmpty(process.env?.[reference])
+    // A reference is a resolver, not a value — and "a reference is declared" is
+    // the whole fact this predicate can establish without I/O. `resolveApiKey`
+    // layers the credentials service, the launch environment, and the process
+    // environment behind whichever name it is handed, so whether a value exists
+    // is a question only an `await` can answer; the seam calls `available()`
+    // synchronously while resolving the configured id, and by then it has no
+    // second provider to fall back to.
+    //
+    // Requiring a live `process.env` value on top of the reference therefore
+    // rejects exactly the deployment the credentials domain exists for: a key
+    // in `~/.dsh/.credentials.yaml`, which is where this plugin's own settings
+    // page writes it. The official DeepSeek provider asks the same question by
+    // testing its resolver closure for existence, so the honest answer here is
+    // the same — and a reference that resolves to nothing fails at search time
+    // naming the engine and the reference, never as a refusal before the
+    // request.
+    return nonEmpty(options.apiKey) || nonEmpty(options.apiKeyEnv) || nonEmpty(engine.apiKeyEnv)
   }
 
   /**

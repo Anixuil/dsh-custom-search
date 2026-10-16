@@ -950,13 +950,55 @@ for (const [cause, key] of absenceEntries) {
 assert.equal(absenceSentences.size, absenceEntries.length, '四个成因必须渲染成四句不同的话')
 ok(`探针缺席的 4 种成因各自渲染成不同的句子（含原因原文）`)
 
+// --- availability: what the seam asks before it will use the provider -----
+// `ctx.web` resolves the configured id with a SYNCHRONOUS `provider.available()`
+// (dsh-web's `resolveProvider`), so this predicate cannot ask the credentials
+// service whether the key it is about to need exists: that domain answers
+// asynchronously, and by the time selection runs there is no second provider to
+// fall back to. Reading `process.env` as a precondition therefore declares a
+// working provider unavailable in exactly the deployment the credentials domain
+// exists for — a key in `~/.dsh/.credentials.yaml`, written there by this
+// plugin's own settings page — and the seam then refuses the search before a
+// request is made (`WEB_PROVIDER_CONFIGURED_UNAVAILABLE`).
+//
+// The official DeepSeek search provider answers the same question the same way:
+// its `available()` tests a resolver closure for existence rather than
+// resolving it. Two invariants keep this half matching that answer — every
+// keyed engine must declare a conventional reference, and the predicate must
+// not gate on the live environment.
+const indexSrc = read('index.js')
+const keyedEngines = Object.entries(ENGINES).filter(([, engine]) => engine.keyless !== true)
+assert.equal(keyedEngines.length + 1, Object.keys(ENGINES).length, '免 key 引擎只应有 searxng 一个')
+for (const [id, engine] of keyedEngines) {
+  assert.equal(
+    typeof engine.apiKeyEnv,
+    'string',
+    `${id} 需 key，必须声明约定的凭证引用名 —— available() 的判据就建立在这上面`,
+  )
+  assert.ok(engine.apiKeyEnv.length > 0, `${id} 的凭证引用名不能为空`)
+}
+assert.equal(ENGINES.searxng.apiKeyEnv, null, '免 key 引擎不该声明凭证引用名')
+ok(`每个需 key 引擎都声明了约定的凭证引用名（${keyedEngines.map(([id]) => id).join('、')}）`)
+
+const availableBody = indexSrc.slice(indexSrc.indexOf('  available() {'), indexSrc.indexOf('  async search('))
+assert.ok(availableBody.length > 0, 'index.js 里找不到 available()')
+// Comments here are allowed to discuss the mistake this replaced; only code counts.
+const availableCode = availableBody
+  .replace(/\/\*[\s\S]*?\*\//gu, '')
+  .replace(/^\s*\/\/.*$/gmu, '')
+assert.ok(
+  !/process\.env/u.test(availableCode),
+  'available() 不得以「进程环境里有值」为前提：凭证服务里的 key 在这里同步不可见，那正是把可用 provider 判成不可用的原因',
+)
+assert.match(availableCode, /engine\.apiKeyEnv/u, 'available() 必须把引擎约定的引用名算作「已声明」')
+ok('available() 只看「引用是否声明」，不看进程环境（注释里的讨论不算）')
+
 // --- test-connection probe: the two hand-written declarations -------------
 // The panel reaches the Host's probe through a Remote call. Neither half can
 // generate its declaration — this package has no build step — so both are
 // written by hand, and nothing at runtime cross-checks them: a namespace typo
 // leaves the panel quietly reporting "local checks only". These assertions are
 // that cross-check.
-const indexSrc = read('index.js')
 const pluginModule = await import('../index.js')
 const contribution = mod.PROBE_CONTRIBUTION
 

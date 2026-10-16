@@ -277,6 +277,11 @@ Loader 应用，不用重启。
 > `apiKey` / `apiKeyEnv` 只作用于**当前选中的主引擎**。`fallback` 里的引擎是别的厂商，
 > 各自从自己的环境变量或凭证服务取 key——例如 `engine: searxng` + `fallback: tavily`
 > 只需要额外准备 `TAVILY_API_KEY`。
+>
+> 反过来说：**`apiKeyEnv` 留空才是常态**。留空时引用名跟着主引擎走，
+> 换引擎会自动跟着换；一旦显式填了引用名，它就**压过**引擎约定名（`engine: tavily` +
+> `apiKeyEnv: BRAVE_API_KEY` 就会拿着 Brave 的引用名去解 Tavily 的 key）。所以不要在配置里
+> 硬写引擎专属的引用名，除非你确实要把 key 存在别的名字下。
 
 ### 常见组合
 
@@ -434,8 +439,13 @@ rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-custom-search
 - `ctx.web` 的搜索请求只有 `query` 和 `maxResults` 两个参数，所以**没有**时间范围、域名过滤、
   站点限定这类 provider 级控制（这是服务层的既定边界，不是本插件的取舍）。
 - `search()` 是每次查询一次请求。`fallback` 里多个引擎串行尝试，最坏情况耗时是各超时之和。
-- `available()` 必须是同步、离线的，所以只检查「key 是否配好」，不会去探测引擎是否可达；
-  SearXNG 实例挂了会体现为搜索报错，而不是提供方不可用。
+- `available()` 必须是同步、离线的——服务层在选中 `custom-search` 时就是这么调它的——所以它只能
+  回答「有没有声明一个凭证**引用**」，回答不了「引用背后有没有值」：那个答案只有异步的凭证服务有。
+  **声明了引用就算可用**，判的是「有没有解析器」而不是「解析器当前有没有值」；官方 DeepSeek
+  搜索提供方用的也是这个判据（它检查自己的 resolver 闭包是否存在）。代价是缺 key 会推迟到
+  **搜索时**才报错——报的是引擎名与引用名，比在请求发出前被拦下更有用。`process.env` 里有值
+  不是必要条件，因为 key 的正常落点在凭证服务；未知引擎与不合理的 `timeoutMs` 仍判为不可用，
+  SearXNG 实例挂了同样体现为搜索报错。
 
 ## 目录结构
 
@@ -450,8 +460,8 @@ dsh-custom-search/
 ├── icon.svg
 ├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
-    ├── smoke.mjs        20 项：provider 契约、归一化、去重、兜底、取消、错误码、Brave 语言映射与参数省略、探针报告与脱敏
-    ├── validate.mjs     55 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、peerDependencies 对账、Brave 语言枚举、浏览器半侧的契约与渲染、探针两端一致性与缺席文案
+    ├── smoke.mjs        20 项：provider 契约、可用判据、归一化、去重、兜底、取消、错误码、Brave 语言映射与参数省略、探针报告与脱敏
+    ├── validate.mjs     57 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、peerDependencies 对账、Brave 语言枚举、可用判据（引用即解析器）、浏览器半侧的契约与渲染、探针两端一致性与缺席文案
     ├── degraded-probe.mjs  子进程跑的降级用例：没有 Typert 包时探针缺席但 provider 照常
     ├── stubs/           只在 dev 里顶替 @deepseek-ai/dsh-typert-protocol（含注册用的 resolve hook）
     ├── bundle-rows.mjs  对着任一份 patch 复现卸载判据（bundle-in-use），非本包的行会标出来
@@ -498,6 +508,19 @@ python peer-closure.py   # 安装包到底供不供得起本插件声明的每�
 要么是 `undefined`，要么必须是枚举成员**，用 40 个越界探针（含 `id-ID`、`xx-YY`、`ja`、
 `no`、`pt`、空串、`null`、对象）去撞。想验证这条护栏真的会咬，就把 `braveSearchLang`
 改回 `language.split('-')[0]` —— 两个套件都会当场失败。
+
+`validate.mjs` 里另一条宿主机侧的不变量是**可用判据**。服务层选中 `custom-search` 时会同步调
+一次 `available()`（`dsh-web` 的 `resolveProvider` 里就是 `if (!provider.available())`），
+而那一问只能回答「有没有声明一个凭证引用」——凭证服务是异步的，且到那时已经没有第二个提供方
+可退。原实现在这条判据上多加了一句：引擎约定的引用名还必须在 `process.env` 里有值。于是
+**把 key 存在凭证服务里**这个最常见、也正是本插件设置页自己写出来的部署判成了不可用：
+`configured web provider "custom-search" is registered but unavailable`，请求一行都没发出去。
+所以断言两条不变量：每个需 key 引擎都必须声明约定的引用名（枚举 `ENGINES` 逐个查，将来加引擎
+自动纳入），以及 `available()` 的实现里**不得出现 `process.env`**（只看代码——注释里讨论这个坑
+不算）。参照系是官方的 `dsh-web-search-deepseek`：它的 `available()` 检查的是自己的 resolver
+闭包存不存在，而不是去解出值。想看这条护栏会不会咬，就把 `available()` 改回要求
+`process.env` 有值 —— 两个套件都会当场失败（validate 报「不得以进程环境为前提」，
+smoke 报「未配置任何东西时也应自认可用」）。
 
 `validate.mjs` 里浏览器半侧那段最值得一提：它**真的把 `client.js` 跑了两遍**——先在 `vm` 里
 用 stub 的 `require` 物化工厂，拿一份假 `ctx` 调 `apply(ctx)`，检查它到底注册了什么；再拿一份
