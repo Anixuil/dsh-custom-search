@@ -6,11 +6,18 @@
  * registers one, through `ctx.slots.inject()`. Without this module the row has
  * nothing but a toggle and the plugin cannot be configured from the GUI at all.
  *
- * The page offers two entry points, and both are registered here:
+ * The page offers three entry points, and all three are registered here, because
+ * each one is gated by its own registration and an unregistered slot renders as
+ * nothing rather than as an error:
  *
+ * - `plugins.bundle.config` — the form on this package's own page, the one its
+ *   card in the installed list opens. Keyed by package name, and the page
+ *   renders its whole section only when a registration for that name exists
+ *   (`configured: ledger.bundles.has(pkg.name)`), so without this the package
+ *   page is a title and a blank below it. This is the primary entry point.
  * - `plugins.item` — a card of this plugin's own on the Plugins page, opening a
- *   page with the form. This is the shape the official settings pages use, and
- *   the only one reachable without opening the bundle first.
+ *   page with the same form. This is the shape the official settings pages use,
+ *   and the only one reachable without opening the bundle first.
  * - `plugins.row.config` — the same form behind the 配置 control on this
  *   plugin's own row, which the page offers when (and only when) a registration
  *   exists for `<package name>#<row id>`.
@@ -63,6 +70,16 @@ window.__ModuleLoader__.load({
 
     /** Where the card sorts among the other cards of the page. */
     const ITEM_ORDER = 45
+
+    /**
+     * The form on this package's own page. The page keys this slot by package
+     * name and renders the section only while a registration for that name is
+     * on its ledger, so this registration is what makes the page configurable.
+     */
+    const BUNDLE_SLOT = 'plugins.bundle.config'
+
+    /** This package's name. The bundle-level slot is keyed by it, not by the row. */
+    const PKG_NAME = 'dsh-custom-search'
 
     /** Dictionary namespace owned by this plugin. */
     const NS = 'settings.customSearch'
@@ -817,14 +834,20 @@ window.__ModuleLoader__.load({
     /**
      * The connectivity panel: one button, and whatever the last run reported.
      *
+     * A component of its own rather than a call inlined into the page, so its
+     * two `useState` hooks live on their own fiber. Called inline they would
+     * join the page component's hook chain — and conditionally, since the page
+     * only builds this panel when the registration injected `testConnection` —
+     * so the count could differ between renders, which React rejects.
+     *
      * It owns its own state rather than staging through the settings scope: a
      * probe result is not a setting, and keeping it out of the scope means
      * pressing the button never marks the form dirty.
-     * @param props - the page's actions and locale reader.
+     * @param props - the form's state, the probe action, and the locale reader.
      * @returns the panel.
      */
     function connectionPanel(props) {
-      const t = props.t
+      const { state, t, testConnection } = props
       const [report, setReport] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
 
@@ -833,7 +856,7 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setReport(null)
         Promise.resolve()
-          .then(() => props.testConnection(''))
+          .then(() => testConnection(''))
           .then((next) => setReport(next))
           .catch((error) => setReport({ local: [], remote: { status: 'failed', message: error?.message ?? String(error) } }))
           .then(() => setBusy(false))
@@ -904,8 +927,17 @@ window.__ModuleLoader__.load({
           valueField(props, state, 'language', false),
           valueField(props, state, 'safeSearch', false),
           // Guarded because the injected face is what carries the probe: a card
-          // rendered from a registration without it stays a plain form.
-          typeof props.testConnection === 'function' ? connectionPanel(props, state) : null,
+          // rendered from a registration without it stays a plain form. Mounted
+          // as an element, not called, so its hooks stay off this component's
+          // chain — this branch is the only thing that decides whether they run.
+          typeof props.testConnection === 'function'
+            ? React.createElement(connectionPanel, {
+                key: 'probe',
+                state,
+                t: props.t,
+                testConnection: props.testConnection,
+              })
+            : null,
         ],
       )
     }
@@ -939,9 +971,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Mount this plugin's page on both of the Plugins page's entry points. The
-     * two share one form controller, so a draft staged from either is the same
-     * draft.
+     * Mount this plugin's page on all three of the Plugins page's entry points.
+     * They share one form controller, so a draft staged from any of them is the
+     * same draft, and each is gated by its own registration — which is why all
+     * three have to be registered rather than just the one this build happens
+     * to navigate through.
      * @param ctx - the browser plugin context.
      */
     function apply(ctx) {
@@ -960,6 +994,10 @@ window.__ModuleLoader__.load({
       // renders the form, and the panel says only local checks are available.
       mountProbe(ctx)
 
+      // The package's own page is the primary entry point — it is where the
+      // card in the installed list lands — and the page renders its config
+      // section only while a registration for the package name exists.
+      mount(ctx, card, BUNDLE_SLOT, { key: PKG_NAME }, 'dsh-custom-search: bundle config')
       mount(
         ctx,
         card,
@@ -973,7 +1011,9 @@ window.__ModuleLoader__.load({
     exports.NS = NS
     exports.ROW_ID = ROW_ID
     exports.ROW_KEY = ROW_KEY
+    exports.PKG_NAME = PKG_NAME
     exports.ITEM_SLOT = ITEM_SLOT
+    exports.BUNDLE_SLOT = BUNDLE_SLOT
     exports.ROW_SLOT = ROW_SLOT
     exports.ITEM_ID = ITEM_ID
     exports.PROBE_NAMESPACE = PROBE_NAMESPACE

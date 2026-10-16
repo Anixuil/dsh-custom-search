@@ -103,10 +103,12 @@ provider 契约（`ctx.web.registerSearchProvider` 与返回结构）是照着
 
 ## 配置
 
-**在插件页改**（推荐）。侧栏「插件」，有两个入口，进去是同一张表单：
+**在插件页改**（推荐）。侧栏「插件」，三个入口，进去是同一张表单：
 
-- **「官方」区块里的「自定义搜索引擎」卡片** —— 点开就是配置页，最直接。
-- 或者点开 `dsh-custom-search` 组合包 → 组件行 `custom-search` 右侧的**配置**按钮。
+- **点开 `dsh-custom-search` 组合包** —— 配置表单就在包详情页里。这是最稳的一个入口，
+  因为它和这一行在同一个页面上。
+- **「官方」区块里的「自定义搜索引擎」卡片** —— 点开是一个独立配置页。
+- 或者点开组合包 → 组件行 `custom-search` 右侧的**配置**按钮，进行详情页。
 
 表单里 12 个字段全在，引擎还能用一排胶囊一键切换。点**保存**即写入 profile 的 patch 层并由
 Loader 应用，不用重启。
@@ -153,14 +155,19 @@ Loader 应用，不用重启。
 > 官方那四个配置页（shell 执行器、agent loop、子智能体、DeepSeek 搜索提供方）
 > **各来自一个伴生包**，设置里的「插件」分区只是**只读**清单。
 >
-> 本插件把这一半放在 `client.js`，两个入口都注册（官方只用前者）：
+> 本插件把这一半放在 `client.js`，三个入口全注册：
 >
 > | 槽位 | 寻址字段 | 渲染成 |
 > |---|---|---|
+> | `plugins.bundle.config` | `key` = 包名（keyed 槽） | 包详情页里的配置表单 |
 > | `plugins.item` | `id`（list 槽） | 插件页上一张能直接点开的卡片，带独立页面 |
 > | `plugins.row.config` | `key` = `<包名>#<行 id>`（keyed 槽） | 行详情里的配置表单 |
 >
-> 两者都只在宿主**在服务** `custom-search` 这个设置命名空间时才挂载
+> **三个都得注册，少一个就少一个入口。** 插件页对每个槽都是"没注册就整块不渲染"，
+> 而不是报错：包详情页的配置区由 `ledger.bundles.has(包名)` 控制，为假时整个 section
+> 直接从树里拿掉。0.3.1 之前只注册了后两个，所以从组合包点进去看到的是一个白板。
+>
+> 三者都只在宿主**在服务** `custom-search` 这个设置命名空间时才挂载
 > （`configForms.whileServed`），所以没装/没启用的部署上看不到任何痕迹。
 > 没有它们，这一行就只有启停开关——这正是本插件 0.1.0 的状态。
 
@@ -359,7 +366,7 @@ rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-custom-search
 ```
 dsh-custom-search/
 ├── index.js          宿主半侧：Config schema、provider 注册、凭证解析、兜底链、连通性探针
-├── client.js         浏览器半侧：插件页的配置表单（两个入口）与「测试连接」按钮
+├── client.js         浏览器半侧：插件页的配置表单（三个入口）与「测试连接」按钮
 ├── engines.js        引擎适配表：每个引擎的 build（怎么发请求）+ parse（怎么读响应）
 ├── cordis.patch.yml  组合包 patch：1 行 insert（本插件的行）+ 2 条对既有行的覆盖
 ├── package.json      dsh.bundle.patch + dsh.client 声明、icon、locale、files 白名单
@@ -368,7 +375,7 @@ dsh-custom-search/
 ├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
     ├── smoke.mjs        14 项：provider 契约、归一化、去重、兜底、取消、错误码、探针缺省时的降级
-    ├── validate.mjs     39 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、浏览器半侧的契约与实跑、探针两端一致性
+    ├── validate.mjs     48 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、浏览器半侧的契约与渲染、探针两端一致性
     ├── bundle-rows.mjs  对着任一份 patch 复现卸载判据（bundle-in-use），非本包的行会标出来
     └── asar.py          从 DSH 安装包里抽源码/依赖的解析脚本
 ```
@@ -401,14 +408,21 @@ node validate.mjs   # 清单、patch 方言、两端声明一致性，以及浏�
 node bundle-rows.mjs <某份 cordis.patch.yml>   # 复现宿主的卸载判据，定位「卸不掉」
 ```
 
-`validate.mjs` 里浏览器半侧那段最值得一提：它**真的把 `client.js` 跑了一遍**——在 `vm` 里
-用 stub 的 `require` 物化工厂，再拿一份假 `ctx` 调 `apply(ctx)`，然后检查它到底注册了什么。
-断言覆盖两个槽位各自的寻址字段（`plugins.item` 用 `id`、`plugins.row.config` 用 `key`）、
-卡片 id 不与官方占用的四个撞车、两个入口共用同一份表单，以及注入的 `hooks.<key>`
-与组件读取的 `props.use<Key>()` 拼写一致。**这些全都只会静默失败**——写错一个字符，
-插件行就只剩启停开关，界面上没有任何报错。
+`validate.mjs` 里浏览器半侧那段最值得一提：它**真的把 `client.js` 跑了两遍**——先在 `vm` 里
+用 stub 的 `require` 物化工厂，拿一份假 `ctx` 调 `apply(ctx)`，检查它到底注册了什么；再拿一份
+假 `React`（会真建元素树、真展开函数组件）**把配置页组件渲染一遍**。
 
-（把它写成实跑而不是正则断言，是因为"注册到底发生了没有"这件事，只有跑一遍才答得准。）
+第一遍断言注册的形状：三个槽位各自的寻址字段（`plugins.bundle.config` 用包名、
+`plugins.item` 用 `id`、`plugins.row.config` 用 `<包名>#<行 id>`）、卡片 id 不与官方占用的
+四个撞车、三个入口共用同一份表单、页面组件不自带 React hook、注入的 `hooks.<key>` 与组件
+读取的 `props.use<Key>()` 拼写一致。**这些全都只会静默失败**——写错一个字符，插件行就只剩
+启停开关，界面上没有任何报错。
+
+第二遍渲染才是抓真 bug 的那一遍：**组件抛错时槽运行时会把它从那一格退役，渲染成空白，
+不留任何信息**。所以"能不能渲染"必须真的渲染才知道。0.3.1 修的那个 bug（`connectionPanel`
+的签名漏了 `state`，函数体里 `state?.writable` 于是成了未声明标识符——可选链只护 `null`，
+不护未声明变量）正是靠这一遍抓出来的。渲染这遍还覆盖了三条分支：带探针、不带探针、
+以及探针已出报告（检查行 + 来源列表）。
 
 **探针那几项是同类问题的另一面。** 测试按钮要经 Remote 调用才能碰到宿主，而这个包没有构建步骤，
 `@deepseek-ai/dsh-typert-generator` 本该产出的那两份声明只能手写；**写错命名空间不会报错**，

@@ -256,14 +256,37 @@ const clientConst = (name) => {
   return match[1]
 }
 
-// The page offers two entry points and both are needed: `plugins.item` is the
-// card that opens this plugin's own page (the shape the official settings pages
-// use, and the only one reachable without opening the bundle first), while
-// `plugins.row.config` is the 配置 control the page puts on a row — and only
-// when a registration exists for `<package name>#<row id>`.
+// The page offers three entry points and all three are needed, because each one
+// is gated by its own registration and an unregistered slot renders as nothing
+// rather than as an error:
+//
+// - `plugins.bundle.config` is the form on this package's own page. The page
+//   pulls that section out of the tree entirely unless a registration for the
+//   package name is on its ledger (`configured: ledger.bundles.has(pkg.name)`),
+//   so a missing registration is exactly a page that is a title over a blank.
+// - `plugins.item` is the card that opens a page of this plugin's own (the shape
+//   the official settings pages use, and the only one reachable without opening
+//   the bundle first).
+// - `plugins.row.config` is the 配置 control the page puts on a row — and only
+//   when a registration exists for `<package name>#<row id>`.
+assert.equal(clientConst('BUNDLE_SLOT'), 'plugins.bundle.config', 'BUNDLE_SLOT 必须是包页的配置槽')
 assert.equal(clientConst('ITEM_SLOT'), 'plugins.item', 'ITEM_SLOT 必须是插件页的卡片槽')
 assert.equal(clientConst('ROW_SLOT'), 'plugins.row.config', 'ROW_SLOT 必须是行的配置槽')
-ok(`两个入口的槽位正确（${clientConst('ITEM_SLOT')} + ${clientConst('ROW_SLOT')}）`)
+ok(
+  `三个入口的槽位正确（${clientConst('BUNDLE_SLOT')} + ${clientConst('ITEM_SLOT')} + ${clientConst('ROW_SLOT')}）`,
+)
+
+// The bundle slot is keyed by package name while the row slot is keyed by
+// `<package name>#<row id>`: serving one does not serve the other, so both the
+// name and the composed row key have to be right.
+assert.equal(clientConst('PKG_NAME'), pkg.name, 'PKG_NAME 必须等于包名：包页的槽按包名寻址')
+ok(`包页槽按包名寻址（${clientConst('PKG_NAME')}）`)
+
+assert.ok(
+  /mount\(\s*ctx,\s*card,\s*BUNDLE_SLOT,\s*\{\s*key:\s*PKG_NAME\s*\}/u.test(clientSrc),
+  'BUNDLE_SLOT 必须按 PKG_NAME 注册：包页用 entryKey = pkg.name 取这一条',
+)
+ok('包页槽按 PKG_NAME 注册')
 
 const rowKey = clientConst('ROW_KEY')
 assert.equal(
@@ -284,8 +307,8 @@ assert.ok(
 // Anchored to a line of its own so the `mount` DECLARATION (which begins with
 // `function`) is not counted as one of its own call sites.
 const mounts = [...clientSrc.matchAll(/^[ \t]+mount\(\s*ctx,\s*card,\s*(\w+)/gmu)].map((match) => match[1])
-assert.deepEqual(mounts, ['ITEM_SLOT', 'ROW_SLOT'], '两个入口都必须挂载，缺一个就少一个配置入口')
-ok(`两个入口都经 configForms.whileServed 挂载（${mounts.join(' + ')}）`)
+assert.deepEqual(mounts, ['BUNDLE_SLOT', 'ITEM_SLOT', 'ROW_SLOT'], '三个入口都必须挂载，缺一个就少一个配置入口')
+ok(`三个入口都经 configForms.whileServed 挂载（${mounts.join(' + ')}）`)
 
 // --- browser half: actually run it ----------------------------------------
 // The checks above read the source's shape. These RUN it: the factory is
@@ -297,6 +320,62 @@ const makeStore = () => {
   let value = null
   return { getSnapshot: () => value, set: (next) => { value = next }, subscribe: () => () => {} }
 }
+
+// --- browser half: actually render it --------------------------------------
+// Everything above RUNS `apply(ctx)`, but none of it ever CALLS a component.
+// That is precisely the gap this closes: a component that throws while
+// rendering is contained by the slot runtime, retired from its cell, and then
+// drawn as nothing at all — so the symptom is a page that is silently blank,
+// with no message anywhere. The stub below builds a real element tree and
+// expands function components, so the page component's body runs for real,
+// including the paths that only execute on the way to a form.
+const ELEMENT = Symbol('react.element')
+
+/** Values the next `useState` calls should settle on, so a panel can be rendered in a non-initial state. */
+const pendingState = []
+const reactStub = {
+  Fragment: 'Fragment',
+  createElement: (type, props, ...children) => ({
+    [ELEMENT]: true,
+    type,
+    props: { ...(props ?? {}), children: children.length === 0 ? undefined : children },
+  }),
+  // This renders once, so a setter never has to do anything; the initial value
+  // comes from the queue when one was staged for this call.
+  useState: (initial) => [
+    pendingState.length > 0 ? pendingState.shift() : (typeof initial === 'function' ? initial() : initial),
+    () => {},
+  ],
+  useEffect: () => {},
+  useRef: (initial) => ({ current: initial }),
+  useMemo: (factory) => factory(),
+  useCallback: (callback) => callback,
+}
+
+/**
+ * Render a node the way React would: call every function component, follow the
+ * children of host ones, and collect every type encountered along the way.
+ * @param node - the element, array of elements, or leaf.
+ * @param seen - accumulator of element types.
+ * @returns the element types in render order.
+ */
+const expand = (node, seen = []) => {
+  if (Array.isArray(node)) {
+    for (const child of node) expand(child, seen)
+    return seen
+  }
+  if (node === null || node === undefined || typeof node !== 'object' || node[ELEMENT] !== true) return seen
+  seen.push(node.type)
+  // A stub primitive is a string marker standing in for a host component: it
+  // renders its children, so they are walked too. A real component is called.
+  if (typeof node.type === 'function') expand(node.type(node.props), seen)
+  else expand(node.props?.children, seen)
+  return seen
+}
+
+/** Readable name for an element type, for assertions and messages. */
+const typeName = (type) => (typeof type === 'string' ? type : type?.name || '(anonymous)')
+
 const uiStub = {
   settingsTextField: (name) => ({ kind: 'text', name }),
   settingsNumberField: (name) => ({ kind: 'number', name }),
@@ -309,8 +388,10 @@ const uiStub = {
     shell() {
       return { available: true, writable: true, dirty: false, invalid: false, saving: false, failed: false }
     }
-    field() {
-      return { text: '', overridden: false, invalid: false }
+    /** An unedited field reads back the value the scope already holds. */
+    field(name) {
+      const current = { engine: 'brave', apiKeyEnv: '', maxResults: '8', timeoutMs: '15000' }
+      return { text: current[name] ?? '', overridden: false, invalid: false }
     }
     bind(project) {
       const store = makeStore()
@@ -322,10 +403,15 @@ const uiStub = {
     }
     dispose() {}
   },
-  SettingsForm: (props) => props,
-  SettingsValueField: (props) => props,
-  SettingsSecretField: (props) => props,
-  Pill: (props) => props,
+  // String markers, not functions: these are host components, and calling one
+  // would swallow its children and hide everything inside it from `expand`.
+  SettingsForm: 'SettingsForm',
+  SettingsValueField: 'SettingsValueField',
+  SettingsSecretField: 'SettingsSecretField',
+  Pill: 'Pill',
+  Button: 'Button',
+  StateDot: 'StateDot',
+  Tag: 'Tag',
 }
 
 const scopeStub = {
@@ -375,7 +461,7 @@ assert.ok(loaded, 'client.js 必须调用 window.__ModuleLoader__.load')
 assert.equal(loaded.id, pkg.name)
 
 const mod = loaded.factory((spec) => {
-  if (spec === 'react') return { createElement: () => null, Fragment: 'Fragment' }
+  if (spec === 'react') return reactStub
   if (spec === '@deepseek-ai/dsh-client-ui-primitives') return uiStub
   throw new Error(`client.js require("${spec}") 未被 stub 覆盖`)
 })
@@ -385,15 +471,20 @@ mod.apply(fakeCtx)
 await new Promise((resolve) => setTimeout(resolve, 0))
 ok('client.js 的 apply(ctx) 能在 stub 上下文里跑完')
 
-assert.equal(registrations.length, 2, `apply 应给两个槽各注册一次，实际 ${registrations.length} 次`)
+assert.equal(registrations.length, 3, `apply 应给三个槽各注册一次，实际 ${registrations.length} 次`)
 const forSlot = (name) => registrations.filter((entry) => entry.options.name === name)
+const bundleReg = forSlot('plugins.bundle.config')
 const itemReg = forSlot('plugins.item')
 const rowReg = forSlot('plugins.row.config')
+assert.equal(bundleReg.length, 1, 'plugins.bundle.config 应注册恰好一次')
 assert.equal(itemReg.length, 1, 'plugins.item 应注册恰好一次')
 assert.equal(rowReg.length, 1, 'plugins.row.config 应注册恰好一次')
 
-// The card is a LIST slot, so it is addressed by `id`; the row config is a
-// KEYED slot, so it is addressed by `key`.
+// The bundle config is a KEYED slot addressed by package name, the card is a
+// LIST slot addressed by `id`, and the row config is a KEYED slot addressed by
+// `<package name>#<row id>`. Registering one of the keyed slots does not serve
+// the other — different keys, different pages.
+assert.equal(bundleReg[0].options.key, pkg.name, 'plugins.bundle.config 必须按包名寻址')
 assert.equal(itemReg[0].options.id, clientConst('ITEM_ID'), 'plugins.item 必须带 id 寻址')
 assert.equal(rowReg[0].options.key, rowKey, 'plugins.row.config 必须带 key 寻址')
 
@@ -411,8 +502,19 @@ assert.equal(typeof itemReg[0].options.label, 'function', 'plugins.item 必须�
 assert.equal(itemReg[0].options.label(), 'title', 'label 应读词典的 title')
 assert.equal(itemReg[0].options.locale, clientConst('NS'), '注册应带本页的词典命名空间')
 
-// One form, both entry points.
-assert.equal(itemReg[0].component, rowReg[0].component, '两个入口必须渲染同一个组件')
+// One form, all three entry points.
+assert.equal(bundleReg[0].component, itemReg[0].component, '包页与卡片必须渲染同一个组件')
+assert.equal(itemReg[0].component, rowReg[0].component, '卡片与行配置必须渲染同一个组件')
+
+// The package page calls this slot with only `{ view: "page" }` — no `form`
+// prop (only ItemDetail and RowDetail pass one). The component therefore has to
+// take its state from the injected store; reading a passed-in form would leave
+// the package page, which is the primary entry point, empty.
+assert.ok(
+  !/props\.form\b/u.test(clientSrc),
+  '组件不能依赖 props.form：包页调用该槽时不传 form',
+)
+ok('包页不传 form，组件自持状态')
 
 // The injected face names the store under `hooks.<key>`, and the page exposes
 // it to the component as `props.use<Key>`; a mismatch is silent. Reading the
@@ -428,7 +530,122 @@ assert.ok(
 for (const action of ['save', 'discard', 'edit', 'resetField']) {
   assert.equal(typeof face[action], 'function', `inject() 必须暴露 ${action}，组件把它当作 props.${action}`)
 }
-ok(`两个入口共用一份表单（props.${propName} + save/discard/edit/resetField）`)
+ok(`三个入口共用一份表单（props.${propName} + save/discard/edit/resetField）`)
+
+// --- the page component, rendered -----------------------------------------
+// Everything up to here proves the registrations are shaped right. This proves
+// the component they point at actually renders. A component that throws is
+// contained by the slot runtime, retired from its cell, and drawn as nothing at
+// all — so "renders" is the property that has to be asserted, and a page that
+// is blank with no message anywhere is the failure it guards against.
+const Card = itemReg[0].component
+const noop = () => {}
+const pageState = face.hooks[hookKey].getSnapshot()
+const pageProps = {
+  view: 'page',
+  t: (key) => key,
+  [propName]: (select) => select(pageState),
+  save: noop,
+  discard: noop,
+  edit: noop,
+  resetField: noop,
+  testConnection: async () => ({ local: [], remote: { status: 'unavailable' } }),
+}
+
+let pageTypes
+assert.doesNotThrow(() => {
+  pageTypes = expand(Card(pageProps)).map(typeName)
+}, 'page 视图渲染抛错：组件一抛错就会被槽运行时退役，整块配置区显示为空白')
+
+for (const expected of ['SettingsForm', 'SettingsValueField', 'SettingsSecretField', 'Button']) {
+  assert.ok(pageTypes.includes(expected), `page 视图的渲染树里缺少 ${expected}`)
+}
+const fieldCount = pageTypes.filter((name) => name === 'SettingsValueField').length
+assert.ok(fieldCount >= 11, `page 视图应渲染至少 11 个值字段（schema 的非密文字段），实际 ${fieldCount}`)
+ok(`page 视图渲染成功（${fieldCount} 个值字段 + 密钥控件 + 连接面板）`)
+
+// The summary view is the list card's one-liner: one string, and no form. It
+// still gets the hook, because the component reads it above its view branch —
+// hooks cannot be called conditionally, so every view sends the same one.
+assert.equal(
+  Card({ view: 'summary', t: (key) => key, [propName]: (select) => select(pageState) }),
+  'summary',
+  'summary 视图必须返回词典的 summary 文案',
+)
+ok('summary 视图只返回一行文案')
+
+// A settled probe report, so the branches that only render once something has
+// run — the check lines and the source list — execute too.
+pendingState.push(
+  {
+    local: [
+      { level: 'ok', key: 'chkEngineOk', vars: { v: 'Brave Search' } },
+      { level: 'bad', key: 'chkKeyMissing', vars: { v: 'BRAVE_API_KEY' } },
+    ],
+    dirty: true,
+    remote: {
+      status: 'ok',
+      count: 2,
+      elapsedMs: 12,
+      engineLabel: 'Brave Search',
+      sources: [{ title: 'Alpha', url: 'https://example.test/a' }],
+    },
+  },
+  false,
+)
+let reportedTypes
+assert.doesNotThrow(() => {
+  reportedTypes = expand(Card(pageProps)).map(typeName)
+}, '带探针报告时 page 视图渲染抛错')
+assert.ok(reportedTypes.includes('Button'), '带报告的连接面板应仍渲染按钮')
+ok('带探针报告时 page 视图渲染成功（检查行 + 来源列表）')
+
+// A registration that injected no probe still renders — as a plain form.
+const bareProps = { ...pageProps }
+delete bareProps.testConnection
+let bareTypes
+assert.doesNotThrow(() => {
+  bareTypes = expand(Card(bareProps)).map(typeName)
+}, '未注入 testConnection 时 page 视图渲染抛错')
+assert.ok(!bareTypes.includes('Button'), '没有探针时不应出现测试连接按钮')
+ok('未注入探针时仍渲染为普通表单')
+
+// The page component must take every hook through its props (`use<Key>` is
+// injected, not called), so the number of hooks it calls cannot depend on which
+// view it renders — a conditional or view-dependent hook chain is rejected by
+// React, and the panel's own hooks now live on its own fiber.
+const cardBody = clientSrc.slice(
+  clientSrc.indexOf('function CustomSearchCard(props)'),
+  clientSrc.indexOf('const inject = ', clientSrc.indexOf('function CustomSearchCard(props)')),
+)
+assert.ok(cardBody.length > 0, '必须能找到 CustomSearchCard 的函数体')
+assert.ok(
+  !/React\.use[A-Z]/u.test(cardBody),
+  'CustomSearchCard 自身不得调用 React hook：hook 数量必须与视图无关',
+)
+ok('页面组件不自带 React hook（hook 一律经 props 注入）')
+
+// `testConnection` is the button's whole payload, so its report shape is
+// checked directly: the local pass always answers, and never rejects.
+const probeReport = await face.testConnection('')
+assert.ok(
+  Array.isArray(probeReport.local) && probeReport.local.length >= 2,
+  `testConnection 必须返回本地检查清单，实际 ${probeReport.local?.length} 项`,
+)
+assert.ok(
+  probeReport.local.some((row) => row.key === 'chkEngineOk'),
+  '已配置的 brave 引擎应通过引擎检查',
+)
+assert.ok(
+  probeReport.local.some((row) => row.key === 'chkKeyMissing'),
+  '未配置密钥时应给出 chkKeyMissing，而不是静默通过',
+)
+assert.equal(typeof probeReport.dirty, 'boolean', 'testConnection 必须报告草稿是否未保存')
+assert.ok(probeReport.remote !== undefined, 'testConnection 必须报告远端一栏（不可用时为 unavailable）')
+for (const row of probeReport.local) {
+  assert.ok(typeof row.key === 'string' && typeof row.level === 'string', '每条本地检查都要有 key 与 level')
+}
+ok(`testConnection 返回本地检查清单（${probeReport.local.length} 项，remote=${probeReport.remote.status}）`)
 
 const clientInject = clientDecl.inject ?? []
 for (const dep of ['@deepseek-ai/dsh-client-ui-settings', '@deepseek-ai/dsh-client-ui-plugin-manager']) {
