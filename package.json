@@ -1,6 +1,6 @@
 {
   "name": "dsh-custom-search",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Replace the built-in DeepSeek web search with a configurable engine (SearXNG / Tavily / Exa / Brave / Serper / Bing / Google CSE).",
   "license": "MIT",
   "author": "Anixuil",
@@ -22,12 +22,14 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
   "icon": "./icon.svg",
   "files": [
     "index.js",
+    "client.js",
     "engines.js",
     "cordis.patch.yml",
     "locale/*.json",
@@ -49,6 +51,16 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
     }
   }
 }

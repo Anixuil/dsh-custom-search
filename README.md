@@ -66,6 +66,19 @@ dsh plugin --profile desktop add <本仓库的绝对路径>
 > 本插件没有构建步骤，`github:` 源可以直装。若 pnpm 仍拦下构建脚本，
 > 在 `$DSH_HOME/profiles/desktop/pnpm-workspace.yaml` 的 `allowBuilds` 里放行 `dsh-custom-search`。
 
+### 升级：必须先卸载再装
+
+插件管理器**不提供升级**——它不列注册表版本，也没有更新按钮。改了版本要：
+
+```bash
+dsh plugin --profile desktop remove dsh-custom-search
+dsh plugin --profile desktop add github:Anixuil/dsh-custom-search#main
+```
+
+从面板装的话同理：卸载后用同一个 `github:` 地址再装一次。装完重启 Harness。
+
+> `github:` 源拉的是默认分支的当前提交，所以重装即拿到最新代码。
+
 ### 兼容性
 
 provider 契约（`ctx.web.registerSearchProvider` 与返回结构）是照着
@@ -78,52 +91,33 @@ provider 契约（`ctx.web.registerSearchProvider` 与返回结构）是照着
 
 ## 配置
 
-> **本插件目前没有图形配置界面。** 详见下面的原因与写法。
+**在插件页改**（推荐）。侧栏「插件」→ 点开 `dsh-custom-search` 这个组合包 →
+组件行 `custom-search`（自定义搜索引擎）右侧点**配置**。表单里 12 个字段全在，
+引擎还能用一排胶囊一键切换。点**保存**即写入 profile 的 patch 层并由 Loader 应用，不用重启。
 
-### 为什么界面上找不到配置入口
+**API Key 不进设置文件**：它经凭证服务写入，引用名默认取该引擎约定的环境变量名
+（Brave 是 `BRAVE_API_KEY`）。填一次就持久保存，文件里只留引用名。
 
-DSH 的配置页**不是**从 `Config` schema 自动生成的。插件页只显示**自己注册了配置页**的插件——
-注册靠插件的「浏览器半侧」调用 `ctx.slots.inject()`，占用插件页声明的三个 slot 之一：
+### 没有界面时：直接改 profile 的 patch 层
 
-| slot | key | 出现在 |
-|---|---|---|
-| `plugins.item` | 条目 id | 官方分组里 |
-| `plugins.bundle.config` | **包名** | 组合包页描述与组件行**之间** |
-| `plugins.row.config` | `<包名>#<行 id>` | 该行多出一个**配置**控件，点开是独立页面 |
-
-安装随附的四个宿主平面配置页（shell 执行器、agent loop、子智能体、DeepSeek 搜索提供方）
-**各来自一个伴生包**（`dsh-client-ui-settings-shell` / `-agent-loop` / `-subagent` /
-`-settings-web-search`）。设置里的「插件」分区是**只读**清单，不提供编辑。
-
-本插件只发布了宿主半侧（`apply(ctx)`），没有浏览器半侧，所以插件页上它只有启停开关。
-这一点在插件页自己就能验证：组件行上没有「配置」控件。
-
-### 现在怎么配
-
-写进 **profile 的 patch 层**，它在所有 bundle 层之后应用，优先级高于插件自带的默认值：
-
-`$DSH_HOME/profiles/desktop/cordis.patch.yml`
-（即 `~/.dsh/profiles/desktop/cordis.patch.yml`；Windows 是
-`C:\Users\<你>\.dsh\profiles\desktop\cordis.patch.yml`）
+`$DSH_HOME/profiles/desktop/cordis.patch.yml` 在所有 bundle 层之后应用，优先级高于插件自带的默认值：
 
 ```yaml
 - id: custom-search
   name: dsh-custom-search
   config:
-    engine: searxng
-    endpoint: http://127.0.0.1:8080
-    fallback: tavily
-    maxResults: 8
-    language: zh-CN
-    safeSearch: moderate
+    engine: brave
 ```
 
 - **只写要改的字段**。没写的字段回落到 `Config` schema 的默认值（每个字段都有默认值）。
-- 改完**重启 Harness**。
+- 手改后**重启 Harness**。
 - 同一个 id 已存在于 profile patch 时改那一条，不要重复添加。
 
-> 注意 profile patch 是**整行替换 config**、不是深合并——但因为本插件每个字段都有 schema
-> 默认值，这里不需要像 `web` 那一行那样把所有字段都抄一遍。
+> **为什么配置页要插件自带？** DSH 的插件页只渲染**插件自己注册了配置页**的插件——
+> 官方那四个配置页（shell 执行器、agent loop、子智能体、DeepSeek 搜索提供方）
+> **各来自一个伴生包**，设置里的「插件」分区只是**只读**清单。本插件把这一半放在 `client.js`：
+> 通过 `ctx.slots.inject('plugins.row.config', …)` 注册，键是 `<包名>#<行 id>`。
+> 没有它，这一行就只有启停开关——这正是本插件 0.1.0 的状态。
 
 ### 字段
 
@@ -248,10 +242,13 @@ dsh plugin --profile desktop remove dsh-custom-search
 
 ## 已知限制
 
-- **没有图形配置界面**，也没有「测试连接」按钮（原因见「配置」）。配置只能写在 profile 的 patch 层。
-  浏览器半侧是待补的下一步。
-- 因为没有可写 secret 的设置页，`apiKey` 要么直接写在 profile patch 里（明文，仅本机），
-  要么用 `apiKeyEnv` 指到环境变量。`ctx.credentials` 那条解析路径要等有写入界面才用得上。
+- **没有「测试连接」按钮**。表单只做暂存与写入校验，不会去探测引擎是否可达；
+  配错了表现为搜索报错，不是表单报错。
+- **换引擎不会迁移密钥**。`apiKeyEnv` 留空时引用名跟着主引擎走（`brave` → `BRAVE_API_KEY`），
+  所以从 Brave 换到 Tavily 要在表单里另填一个 key；旧的那个仍留在凭证服务里。
+- `engine` 在 schema 里是 `union`，表单上是文本框 + 一排胶囊。填了 union 之外的值**保存会失败**，
+  表单会保留草稿让你改（`SettingsForm` 的既定行为）。
+- 仍可以把密钥明文写进 profile patch 的 `apiKey` 字段（只在本机），但推荐走表单/凭证服务。
 - `ctx.web` 的搜索请求只有 `query` 和 `maxResults` 两个参数，所以**没有**时间范围、域名过滤、
   站点限定这类 provider 级控制（这是服务层的既定边界，不是本插件的取舍）。
 - `search()` 是每次查询一次请求。`fallback` 里多个引擎串行尝试，最坏情况耗时是各超时之和。
@@ -262,16 +259,17 @@ dsh plugin --profile desktop remove dsh-custom-search
 
 ```
 dsh-custom-search/
-├── index.js          插件入口：Config schema、provider 注册、凭证解析、兜底链
+├── index.js          宿主半侧：Config schema、provider 注册、凭证解析、兜底链
+├── client.js         浏览器半侧：插件页的配置表单（plugins.row.config）
 ├── engines.js        引擎适配表：每个引擎的 build（怎么发请求）+ parse（怎么读响应）
 ├── cordis.patch.yml  安装时写入 profile 组合的三行覆盖
-├── package.json      dsh.bundle.patch 声明、icon、locale、files 白名单
+├── package.json      dsh.bundle.patch + dsh.client 声明、icon、locale、files 白名单
 ├── locale/           面板显示用的中英文标题与描述
 ├── icon.svg
 ├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
     ├── smoke.mjs     13 项：provider 契约、归一化、去重、兜底、取消、错误码
-    ├── validate.mjs  15 项：清单、patch 方言、patch 与 Config schema 对齐
+    ├── validate.mjs  28 项：清单、patch 方言、patch 与 Config 对齐、浏览器半侧契约
     └── asar.py       从 DSH 安装包里抽源码/依赖的解析脚本
 ```
 
@@ -283,7 +281,9 @@ dsh plugin --profile desktop add D:\code\self\all\dsh-custom-search
 ```
 
 新增一个搜索引擎 = 在 `engines.js` 的 `ENGINES` 里加一个条目，声明 `build` 和 `parse`，
-再到 `index.js` 的 `Config.engine` union 里加上这个 id。
+再到 `index.js` 的 `Config.engine` union 里加上这个 id，
+最后在 `client.js` 的 `ENGINES` 里补一行（浏览器半侧够不到宿主半侧的源码，这张表是刻意重复的，
+`validate.mjs` 会盯着两边不许漂移）。
 
 ### 验证
 
@@ -292,8 +292,12 @@ dsh plugin --profile desktop add D:\code\self\all\dsh-custom-search
 ```bash
 cd dev
 node smoke.mjs      # 起本地 mock server，用 stub ctx.web 驱动真实插件模块
-node validate.mjs   # 校验清单、patch 方言以及 patch 与 Config schema 的对齐
+node validate.mjs   # 清单、patch 方言、patch 与 Config 对齐，以及浏览器半侧的契约
 ```
+
+`validate.mjs` 里浏览器半侧那几项值得一提：factory id、`plugins.row.config` 的 key、
+`configForms` 用的命名空间、以及每个 `require` 是否命中平台模块表。
+**这些全都只会静默失败**——写错一个字符，插件行就只剩启停开关，没有任何报错。
 
 两个脚本需要 `js-yaml`、`@deepseek-ai/schemastery`、`@deepseek-ai/cosmokit`
 （已放在本目录的 `node_modules/`，被 `.gitignore` 忽略）。
