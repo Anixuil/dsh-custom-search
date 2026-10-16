@@ -128,6 +128,11 @@ DSH 的解法是 `dsh-app-boot` 给 profile 装的一层**模块解析拦截**�
 填具体范围等于每次 Harness 升级都要用户去开一次 exact-version 豁免。
 `@deepseek-ai/schemastery` 不在该检查范围内，但一并写 `*` 保持一致。
 
+**这份清单是重启即生效，不用重装。** `readPeerNames()` 是每次解析时现读磁盘上的
+`package.json`（`readFileSync`，无缓存），而"这是 linked 目录"这个事实来自 profile 的
+`link:` 依赖，本来就在——所以本地目录安装改完 `package.json` 重启一次即可。
+只有 `github:` 源安装才需要卸载重装（它拉的是仓库快照，本地改什么都不影响它）。
+
 （`node_modules/` 里那份 `@deepseek-ai/{cosmokit,schemastery}` 只是**离线跑 `dev/` 测试**用的，
 `.gitignore` 忽略、`files` 白名单排除；运行时由上面的拦截优先接管，越不过去。）
 
