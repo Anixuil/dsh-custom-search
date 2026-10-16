@@ -225,6 +225,16 @@ window.__ModuleLoader__.load({
       probeUnavailable: '宿主没有提供探针，只能做本地检查。',
       probeOk: '{v} 返回 {n} 条结果，用时 {ms} ms。',
       probeFail: '请求失败：{msg}',
+      probeRequest: '{m} {url}',
+      probeStatus: 'HTTP {s} · {ms} ms',
+      probeNoStatus: '未拿到响应 · {ms} ms',
+      probeCredential: '密钥来源：{v}',
+      keySourceLiteral: '配置里的字面密钥',
+      keySourceCredential: '凭据服务（{v}）',
+      keySourceLaunch: '启动环境（{v}）',
+      keySourceProcess: '进程环境变量（{v}）',
+      keySourceMissing: '未找到（{v}）',
+      keySourceFree: '不需要（该引擎免密钥）',
       chkEngineOk: '引擎：{v}',
       chkEngineBad: '引擎无效：{v}',
       chkKeyOk: '密钥：已配置（{v}）',
@@ -285,6 +295,16 @@ window.__ModuleLoader__.load({
       probeUnavailable: 'The Host exposed no probe, so only the local checks are available.',
       probeOk: '{v} returned {n} source(s) in {ms} ms.',
       probeFail: 'Request failed: {msg}',
+      probeRequest: '{m} {url}',
+      probeStatus: 'HTTP {s} · {ms} ms',
+      probeNoStatus: 'no response · {ms} ms',
+      probeCredential: 'Credential from: {v}',
+      keySourceLiteral: 'the literal key in the settings',
+      keySourceCredential: 'the credentials service ({v})',
+      keySourceLaunch: 'the launching environment ({v})',
+      keySourceProcess: 'the process environment ({v})',
+      keySourceMissing: 'nowhere ({v})',
+      keySourceFree: 'not needed (this engine is keyless)',
       chkEngineOk: 'Engine: {v}',
       chkEngineBad: 'Unknown engine: {v}',
       chkKeyOk: 'Credential: configured ({v})',
@@ -692,6 +712,7 @@ window.__ModuleLoader__.load({
           elapsedMs: value.elapsedMs ?? 0,
           engineLabel: value.engineLabel,
           chain: Array.isArray(value.chain) ? value.chain : [],
+          attempts: Array.isArray(value.attempts) ? value.attempts : [],
           sources: Array.isArray(value.sources) ? value.sources : [],
           message: value.error,
         }
@@ -791,6 +812,47 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** Dictionary key per credential origin the Host reports. */
+    const KEY_SOURCE_OF = {
+      literal: 'keySourceLiteral',
+      credential: 'keySourceCredential',
+      'launch-environment': 'keySourceLaunch',
+      'process-env': 'keySourceProcess',
+      free: 'keySourceFree',
+      'not-needed': 'keySourceFree',
+      none: 'keySourceMissing',
+    }
+
+    /** The indented line style every detail row shares. */
+    const DETAIL_STYLE = { margin: '4px 0 0 14px', opacity: 0.7 }
+
+    /**
+     * How one attempt reads: where the key came from, then the request itself.
+     *
+     * These are the facts that separate the failures a user cannot tell apart —
+     * a wrong key, a wrong host, and a deployment that never resolved the key at
+     * all — so the panel states them instead of collapsing them into "failed".
+     * @param attempt - one `remote.attempts` entry from the Host.
+     * @param t - the page's locale reader.
+     * @returns the detail rows, possibly empty.
+     */
+    function attemptLines(attempt, t) {
+      const rows = []
+      const source = KEY_SOURCE_OF[String(attempt?.credential ?? '')]
+      if (source !== undefined) {
+        rows.push(format(t('probeCredential'), {
+          v: attempt?.ref ? format(t(source), { v: String(attempt.ref) }) : t(source),
+        }))
+      }
+      if (typeof attempt?.endpoint === 'string') {
+        rows.push(format(t('probeRequest'), { m: String(attempt.method ?? 'GET'), url: attempt.endpoint }))
+      }
+      const ms = Number.isFinite(attempt?.ms) ? attempt.ms : 0
+      if (Number.isFinite(attempt?.status)) rows.push(format(t('probeStatus'), { s: attempt.status, ms }))
+      else if (attempt?.endpoint !== undefined && attempt?.endpoint !== null) rows.push(format(t('probeNoStatus'), { ms }))
+      return rows
+    }
+
     /**
      * The line describing the real request, in any of its four states.
      * @param remote - the report's `remote` field.
@@ -804,26 +866,31 @@ window.__ModuleLoader__.load({
         return React.createElement('li', { key: 'probe', style: { ...style, opacity: 0.6 } }, `· ${t('probeUnavailable')}`)
       }
 
-      if (remote.status === 'failed') {
-        return React.createElement(
-          'li',
-          { key: 'probe', style },
-          `✗ ${format(t('probeFail'), { msg: String(remote.message ?? '') })}`,
-        )
-      }
-
       const children = [
         React.createElement(
           'span',
           { key: 'head' },
-          `✓ ${format(t('probeOk'), { n: remote.count ?? 0, ms: remote.elapsedMs ?? 0, v: String(remote.engineLabel ?? '') })}`,
+          remote.status === 'failed'
+            ? `✗ ${format(t('probeFail'), { msg: String(remote.message ?? '') })}`
+            : `✓ ${format(t('probeOk'), { n: remote.count ?? 0, ms: remote.elapsedMs ?? 0, v: String(remote.engineLabel ?? '') })}`,
         ),
       ]
+
+      // Every attempt is reported, including the ones a fallback chain abandoned,
+      // so a working fallback does not hide a broken primary.
+      for (const [index, attempt] of (remote.attempts ?? []).entries()) {
+        for (const [row, line] of attemptLines(attempt, t).entries()) {
+          children.push(
+            React.createElement('div', { key: `attempt-${index}-${row}`, style: DETAIL_STYLE }, line),
+          )
+        }
+      }
+
       for (const [index, source] of (remote.sources ?? []).entries()) {
         children.push(
           React.createElement(
             'div',
-            { key: `source-${index}`, style: { margin: '4px 0 0 14px', opacity: 0.7 } },
+            { key: `source-${index}`, style: DETAIL_STYLE },
             `${index + 1}. ${String(source?.title || source?.url || '')}`,
           ),
         )

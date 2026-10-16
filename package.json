@@ -1,6 +1,6 @@
 {
   "name": "dsh-custom-search",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Replace the built-in DeepSeek web search with a configurable engine (SearXNG / Tavily / Exa / Brave / Serper / Bing / Google CSE).",
   "license": "MIT",
   "author": "Anixuil",
@@ -17,6 +17,19 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-credentials": "*",
+    "@deepseek-ai/dsh-launch-environment": "*",
+    "@deepseek-ai/dsh-typert-protocol": "*",
+    "@deepseek-ai/dsh-web": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-credentials": { "optional": true },
+    "@deepseek-ai/dsh-launch-environment": { "optional": true },
+    "@deepseek-ai/dsh-typert-protocol": { "optional": true },
+    "@deepseek-ai/dsh-web": { "optional": true }
   },
   "type": "module",
   "main": "index.js",

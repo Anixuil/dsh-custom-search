@@ -61,6 +61,38 @@ function endpointFor(base, path) {
 }
 
 /**
+ * Strip a request URL down to what is safe to show a user: scheme, host, path.
+ *
+ * The query string is what carries a credential for the engines that put one in
+ * the URL (Google CSE sends `key=`), and it also carries the user's query text;
+ * a connectivity report is read in a settings page and logged, so neither
+ * belongs in it.
+ * @param raw - the full request URL, string or URL.
+ * @returns `https://host/path`, or the input if it does not parse.
+ */
+export function publicEndpoint(raw) {
+  try {
+    const url = new URL(String(raw))
+    return `${url.protocol}//${url.host}${url.pathname}`
+  } catch {
+    return String(raw)
+  }
+}
+
+/**
+ * Remove credentials that a URL smuggled into free text.
+ *
+ * Failure messages quote the request URL (a timeout says which request timed
+ * out), so redacting the report's own fields is not enough — any absolute URL
+ * inside an error string is rewritten to its public form too.
+ * @param text - the text to sanitize.
+ * @returns the same text with every absolute http(s) URL reduced to host + path.
+ */
+export function redactUrls(text) {
+  return String(text).replace(/https?:\/\/[^\s"'<>\\]+/gu, (match) => publicEndpoint(match))
+}
+
+/**
  * Race the caller's abort signal against one operation's timeout budget and
  * report which one fired, so a timeout never reads as a user cancellation.
  */
@@ -91,9 +123,11 @@ function createGate(signal, timeoutMs) {
  * @param keepRedirects - keyless engines follow redirects (self-hosted SearXNG
  *   commonly redirects http to https); an engine that carries an API key rejects
  *   them so the credential can never be replayed to an unvetted host.
+ * @returns the parsed body plus the exchange facts a caller may want to show.
  */
 async function requestJson({ url, init, timeoutMs, signal, keepRedirects }) {
   const gate = createGate(signal, timeoutMs)
+  const startedAt = Date.now()
   try {
     const response = await fetch(url, {
       ...init,
@@ -106,13 +140,19 @@ async function requestJson({ url, init, timeoutMs, signal, keepRedirects }) {
       const detail = body.slice(0, 300).replace(/\s+/gu, ' ').trim()
       const error = new Error(`HTTP ${response.status}${detail.length > 0 ? `: ${detail}` : ''}`)
       error.code = `HTTP_${response.status}`
+      // Recorded on the error so a failure report can still name the status and
+      // how long the round trip took — the two facts that separate "bad key"
+      // from "wrong host" from "network is down".
+      error.status = response.status
+      error.elapsedMs = Date.now() - startedAt
       throw error
     }
-    return await response.json()
+    return { json: await response.json(), status: response.status, elapsedMs: Date.now() - startedAt }
   } catch (error) {
     if (gate.timedOut() === true) {
       const timeout = new Error(`request to ${url} did not complete within ${timeoutMs}ms`)
       timeout.code = 'TIMEOUT'
+      timeout.elapsedMs = Date.now() - startedAt
       throw timeout
     }
     throw error
@@ -363,6 +403,11 @@ export const ENGINE_IDS = Object.keys(ENGINES)
 
 /**
  * Run one engine for one query.
+ *
+ * `options.trace`, when it is a function, receives exactly one record per call —
+ * the exchange's outcome whether it succeeded or not. That is what lets the
+ * settings page answer "is my key actually working?" with the status code, the
+ * host it talked to, and the round-trip time instead of a bare yes/no.
  * @param engineId - a key of {@link ENGINES}.
  * @param query - the caller's query string.
  * @param options - the resolved plugin options for this search.
@@ -374,25 +419,51 @@ export async function runEngine(engineId, query, options, apiKey, signal) {
   const engine = ENGINES[engineId]
   if (engine === undefined) throw new Error(`unknown search engine "${engineId}"`)
 
+  const trace = typeof options.trace === 'function' ? options.trace : undefined
+  const startedAt = Date.now()
+  const report = (record) => {
+    if (trace === undefined) return
+    trace({ engine: engineId, engineLabel: engine.label, ms: Date.now() - startedAt, ...record })
+  }
+
   const wantsKey = engine.keyless !== true
   if (wantsKey && text(apiKey) === undefined) {
+    report({ ok: false, error: `${engine.label} 需要 API key，但未配置（apiKey 或 ${engine.apiKeyEnv}）` })
     throw new Error(`${engine.label} 需要 API key，但未配置（apiKey 或 ${engine.apiKeyEnv}）`)
   }
   if (engine.requiresExtra === 'googleCx' && text(options.googleCx) === undefined) {
+    report({ ok: false, error: 'Google CSE 还需要填写「搜索引擎 ID (cx)」' })
     throw new Error('Google CSE 还需要填写「搜索引擎 ID (cx)」')
   }
 
   const base = baseUrl(options.endpointOverride, engine.defaultEndpoint)
   const { url, init } = engine.build({ query }, options, base, text(apiKey))
+  const endpoint = publicEndpoint(url)
+  const method = init?.method ?? 'GET'
 
-  const json = await requestJson({
-    url,
-    init,
-    timeoutMs: options.timeoutMs,
-    signal,
-    keepRedirects: engine.keyless === true,
-  })
-  return normalize(engine.parse(json), options.maxResults)
+  let exchange
+  try {
+    exchange = await requestJson({
+      url,
+      init,
+      timeoutMs: options.timeoutMs,
+      signal,
+      keepRedirects: engine.keyless === true,
+    })
+  } catch (error) {
+    report({ ok: false, method, endpoint, status: error?.status, error: redactUrls(describeForTrace(error)) })
+    throw error
+  }
+
+  const sources = normalize(engine.parse(exchange.json), options.maxResults)
+  report({ ok: true, method, endpoint, status: exchange.status, ms: exchange.elapsedMs, count: sources.length })
+  return sources
+}
+
+/** A failure's one-line description, with its error code when it has one. */
+function describeForTrace(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  return error?.code === undefined ? message : `${error.code}: ${message}`
 }
 
 export function engineLabel(engineId) {

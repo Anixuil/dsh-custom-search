@@ -5,16 +5,24 @@
  * drives the real plugin module through a stub `ctx.web`, and asserts the
  * provider contract the seam relies on.
  *
- * The last case pins the degraded path of the settings page's connectivity
- * probe: with no Typert package installed the probe must bow out without
- * disturbing the provider — which is the state this checkout is in.
+ * The probe cases at the end reach the settings page's connectivity report. They
+ * need `installProbe` to succeed, so this process registers a resolve hook that
+ * stands in for `@deepseek-ai/dsh-typert-protocol` (see `dev/stubs/`). The truly
+ * degraded path — no Typert package at all — runs in a child process without
+ * that hook, so both branches are covered by the real code.
  *
  * Imports the plugin by its real path, so there is no copy to keep in sync.
  */
 import http from 'node:http'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { register } from 'node:module'
+
+register('./stubs/hooks.mjs', import.meta.url)
 
 const plugin = await import('../index.js')
+const stub = await import('./stubs/typert-protocol.js')
 
 const calls = []
 const server = http.createServer((req, res) => {
@@ -99,6 +107,47 @@ function mount(values) {
   }
   plugin.apply(ctx, refs({ ...BASE, ...values }))
   return provider
+}
+
+/**
+ * Mount with a context the probe can register on, and wait for its lazy import
+ * to settle — `apply` fires `installProbe` without awaiting it.
+ * @param values - config overrides layered over {@link BASE}.
+ * @returns the provider, the contexts, and the probe the last mount installed.
+ */
+/**
+ * Poll until `check` holds.
+ *
+ * The probe is installed through a real dynamic `import()`, whose resolution
+ * takes a variable number of turns of the loop — a fixed delay makes the test
+ * flaky rather than correct.
+ * @param check - the condition to wait for.
+ */
+async function settled(check) {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    if (check()) return
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+  assert.fail('探针安装没有在预期时间内完成')
+}
+
+/**
+ * Mount with a context the probe can register on, and wait for its lazy import
+ * to settle — `apply` fires `installProbe` without awaiting it.
+ * @param values - config overrides layered over {@link BASE}.
+ * @returns the provider, the context, and the probe this mount installed.
+ */
+async function mountWithProbe(values) {
+  let provider
+  const ctx = {
+    web: { registerSearchProvider: (p) => { provider = p; return () => {} } },
+    get: () => undefined,
+    services: [],
+  }
+  const dispose = plugin.apply(ctx, refs({ ...BASE, ...values }))
+  await settled(() => ctx.services.length > 0)
+  assert.equal(ctx.services.length, 1, 'apply 应构造恰好一个探针服务')
+  return { provider, ctx, dispose, probe: ctx.services[0] }
 }
 
 const pass = []
@@ -220,21 +269,75 @@ await assert.rejects(
 )
 ok('Google CSE 缺 cx 时给出明确提示')
 
-// 14. The settings page's connectivity probe is optional. This environment has
-// no Typert package, which is exactly the degraded case: installProbe must bow
-// out quietly and apply() must still register the provider and hand back its
-// disposer, rather than throwing or returning undefined.
-let sawProvider = false
-const noTypertCtx = {
-  web: { registerSearchProvider: () => { sawProvider = true; return () => {} } },
-  get: () => undefined,
-}
-const dispose = plugin.apply(noTypertCtx, refs(BASE))
-assert.equal(typeof dispose, 'function', 'apply 必须返回 registerSearchProvider 的 disposer')
-assert.equal(sawProvider, true)
-// Give the async probe attempt a chance to reject before the process moves on.
-await new Promise((resolve) => setTimeout(resolve, 0))
-ok('Typert 包缺失时 apply 仍注册 provider 并返回 disposer（探针可选）')
+// 14. The settings page's connectivity report is the plugin's only user-facing
+// proof that a key works, so it must show the real exchange: which host was
+// called, what status came back, how long it took, and where the key came from.
+const probed = await mountWithProbe({})
+const probeReport = await probed.probe.test('hello')
+assert.equal(probeReport.ok, true)
+assert.equal(probeReport.count, 2)
+assert.equal(probeReport.attempts.length, 1, '每个引擎都应留下一条尝试记录')
+const [successAttempt] = probeReport.attempts
+assert.equal(successAttempt.engine, 'searxng')
+assert.equal(successAttempt.method, 'GET')
+assert.equal(successAttempt.status, 200)
+assert.equal(successAttempt.ok, true)
+assert.equal(successAttempt.count, 2)
+assert.equal(successAttempt.credential, 'not-needed', '免密钥引擎的来源应是 not-needed')
+assert.equal(successAttempt.endpoint, `${origin}/search`, '端点必须去掉查询串')
+assert.ok(Number.isFinite(successAttempt.ms))
+assert.deepEqual(probeReport.sources.map((source) => source.url), ['https://searx.example/1', 'https://searx.example/2'])
+ok('探针报告带状态码、端点、耗时与结果（查询串已剔除）')
+
+// 15. A failure reports the same facts, so "bad key" and "wrong host" differ.
+const broken = await mountWithProbe({})
+const brokenReport = await broken.probe.test('boom-now')
+assert.equal(brokenReport.ok, false)
+assert.match(String(brokenReport.error), /HTTP 500/)
+assert.equal(brokenReport.attempts[0].status, 500)
+assert.equal(brokenReport.attempts[0].ok, false)
+assert.match(String(brokenReport.attempts[0].error), /HTTP 500/)
+assert.equal(brokenReport.attempts[0].endpoint, `${origin}/search`)
+ok('探针失败时仍报告状态码与端点，而不是只说失败')
+
+// 16. The report must never carry key material or the query text: it is rendered
+// in a settings page and quoted in bug reports.
+const keyed2 = await mountWithProbe({ engine: 'tavily', apiKey: 'tv-secret-value', endpoints: JSON.stringify({ tavily: origin }) })
+const keyed2Report = await keyed2.probe.test('keyed')
+assert.equal(keyed2Report.attempts[0].credential, 'literal', '字面密钥的来源应是 literal')
+assert.equal(keyed2Report.attempts[0].endpoint, `${origin}/search`)
+assert.ok(!JSON.stringify(keyed2Report).includes('tv-secret-value'), '报告不得泄漏密钥')
+assert.ok(!JSON.stringify(probeReport).includes('q=hello'), '报告不得泄漏查询串')
+ok('探针报告不泄漏密钥与查询串')
+
+// 17. Fallback shows up as several attempts, so a green result cannot hide a
+// broken primary engine. The literal key belongs to the primary engine only, so
+// the fallback resolves its own — and the report names where it found it.
+process.env.TAVILY_API_KEY = 'tk-from-env'
+const fallbackProbe = await mountWithProbe({
+  engine: 'searxng',
+  fallback: 'tavily',
+  endpoints: JSON.stringify({ tavily: origin }),
+})
+const fallbackReport = await fallbackProbe.probe.test('empty-results-trigger')
+delete process.env.TAVILY_API_KEY
+assert.equal(fallbackReport.attempts.length, 2, '主引擎与回退引擎各一条尝试记录')
+assert.equal(fallbackReport.attempts[0].count, 0)
+assert.equal(fallbackReport.attempts[1].engine, 'tavily')
+assert.equal(fallbackReport.attempts[1].ok, true)
+assert.equal(fallbackReport.attempts[1].credential, 'process-env')
+assert.equal(fallbackReport.attempts[1].ref, 'TAVILY_API_KEY')
+ok('兜底链的每一跳都留在报告里，并各自标注密钥来源')
+
+// 18. Truly degraded: with no Typert package installed, `installProbe` must bow
+// out, say why and leave the provider intact. This runs in a child process
+// without the resolve hook, so the stand-in cannot mask the real import failure.
+const degraded = spawnSync(process.execPath, [fileURLToPath(new URL('./degraded-probe.mjs', import.meta.url))], {
+  encoding: 'utf8',
+})
+assert.equal(degraded.status, 0, `降级路径子进程应成功退出：\n${degraded.stdout}\n${degraded.stderr}`)
+assert.match(degraded.stdout, /ok: 探针缺席时 provider 与 disposer 都在/)
+ok('Typert 包缺失时 apply 仍注册 provider，并说明探针缺席的原因')
 
 server.close()
 

@@ -101,6 +101,36 @@ provider 契约（`ctx.web.registerSearchProvider` 与返回结构）是照着
 > 仍可能调整。升级 Harness 后若搜索报 `WEB_PROVIDER_*` 错误，先对照
 > `@deepseek-ai/dsh-web` 的 `registerSearchProvider` 签名和 `WebRuntime.Config` 字段。
 
+### 依赖：为什么 `peerDependencies` 是必需的
+
+宿主半侧会 `import` 五个 Harness 自己的包（`schemastery`——`Config` 需要它；
+`dsh-credentials` / `dsh-launch-environment`——解析 key；`dsh-web`——错误码；
+`dsh-typert-protocol`——连通性探针）。这些包**一个都不在插件的 `node_modules` 里、也不该在**：
+
+- 重复安装一份 `@deepseek-ai/cordis` / Typert，会让 `instanceof` 判定的对象身份对不上，
+  探针服务在宿主眼里就不是它认识的那个 Service；
+- 从 npm 拉这些内部包也拉不到与当前运行时同版本的副本。
+
+DSH 的解法是 `dsh-app-boot` 给 profile 装的一层**模块解析拦截**（`profile-resolution-bootstrap.js`）：
+来自 profile 或 linked 目录的模块，其 `@deepseek-ai/*` 导入会被路由到**当前安装的那一份**。
+但它**只对 `package.json` 的 `peerDependencies` 里声明过的名字生效**——linked 安装（
+`link:D:\...`）走 `routeLinked`，逐个祖先目录读 `package.json` 的 `peerDependencies` 才决定拦截。
+没声明就是**解析不到**，而失败方式极其安静：插件照常加载、搜索照常能用，
+只有那个 import 背后的功能凭空消失。
+
+> 这正是 0.3.x 的真实故障：`@deepseek-ai/dsh-typert-protocol` 没声明，`installProbe`
+> 的 `await import()` 抛 `ERR_MODULE_NOT_FOUND`，探针静默退出，界面只显示
+> 「宿主没有提供探针」——看起来像"部署不支持"，实际是**清单少了一行**。
+> `dev/validate.mjs` 现在会拿源码里的 `@deepseek-ai/*` 导入和 `peerDependencies` 对账，
+> 两边任一侧多一条少一条都直接失败。
+
+范围写成 `*` 是刻意的：`dsh-app-boot` 会拿 `@deepseek-ai/dsh-*` 的 peer 去比运行版本，
+填具体范围等于每次 Harness 升级都要用户去开一次 exact-version 豁免。
+`@deepseek-ai/schemastery` 不在该检查范围内，但一并写 `*` 保持一致。
+
+（`node_modules/` 里那份 `@deepseek-ai/{cosmokit,schemastery}` 只是**离线跑 `dev/` 测试**用的，
+`.gitignore` 忽略、`files` 白名单排除；运行时由上面的拦截优先接管，越不过去。）
+
 ## 配置
 
 **在插件页改**（推荐）。侧栏「插件」，三个入口，进去是同一张表单：
@@ -127,14 +157,36 @@ Loader 应用，不用重启。
 1. **本地检查**（不联网，立即出结果）：引擎 id 是否有效、这个引擎要不要 key、key **到底配上了没有**
    （问凭证服务，不是看输入框）、`endpoint` 是否是合法的 http(s) 地址、兜底链里有没有拼错的引擎、
    数值有没有越界。这些正是真实请求只会回一个含糊厂商错误的地方。
-2. **真实请求**：用**已保存的配置**走一遍 agent 实际使用的 provider，真跑一次搜索，报回引擎名、
-   结果条数、耗时和前三条标题。**会消耗 1 次搜索配额。**
+2. **真实请求**：用**已保存的配置**走一遍 agent 实际使用的 provider，真跑一次搜索。**会消耗 1 次搜索配额。**
 
-结果按 `✓ / ✗ / !` 逐条列出。表单里有未保存的改动时会另行提示——本地检查看的是你的输入，
-真实请求用的是已保存的配置。
+结果按 `✓ / ✗ / !` 逐条列出，真实请求那一段是**明细**，不是一句"成功/失败"：
+
+```
+✓ Brave Search 返回 3 条结果，用时 312 ms。
+   密钥来源：凭据服务（BRAVE_API_KEY）
+   GET https://api.search.brave.com/res/v1/web/search
+   HTTP 200 · 298 ms
+   1. 第一条结果的标题
+   2. …
+```
+
+明细里的每一项都对应一个只有它才能回答的问题：
+
+| 明细 | 它能回答的问题 |
+|---|---|
+| 方法与端点（**已去掉查询串**） | 我真的在打这个厂商、这个路径吗？自建 SearXNG 打的是不是我的实例？ |
+| `HTTP 200 / 401 / 403 / 429 / 5xx` | key 无效（401/403）、触发限流（429）、还是厂商挂了（5xx）？ |
+| 往返耗时 | 是超时设置太紧，还是网络真的慢？ |
+| 密钥来源 | **配置里的字面密钥 / 凭据服务 / 启动环境 / 进程环境变量 / 哪里都没找到**——"没配 key"和"配了但这次没解析到"是两个完全不同的故障，修法也不同 |
+| 每一跳各一条 | 兜底链生效时，主引擎那一跳为什么被跳过（返回 0 条，还是报错） |
+
+兜底链里每个被尝试过的引擎都会留一条记录，所以"回退成功了"不会掩盖"主引擎其实是坏的"。
+
+表单里有未保存的改动时会另行提示——本地检查看的是你的输入，真实请求用的是已保存的配置。
 
 > **界面上没有这个按钮**，说明宿主没接受探针（例如部署里没挂 Typert 包），此时只剩本地检查。
 > 这是有意的降级：探针**永远不影响搜索本身**，最多就是少一个按钮。
+> 探针缺席的原因会打到宿主进程的控制台：`[dsh-custom-search] 连接探针未安装：…`。
 
 ### 没有界面时：直接改 profile 的 patch 层
 
@@ -346,10 +398,14 @@ rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-custom-search
 
 - **「测试连接」的探测层可能缺席**。本地检查（字段合法性、凭证状态，不联网）永远可用；
   「真实请求」要经 Remote 调用到宿主，靠 Typert 的源模式发现，宿主没挂载那套包时只剩本地检查。
-  两条路都**不影响搜索本身**——最坏情况是少一个按钮。
+  两条路都**不影响搜索本身**——最坏情况是少一个按钮。缺席原因见上文
+  「依赖：为什么 `peerDependencies` 是必需的」。
 - 探针走的是 Typert 的**源模式兜底**（手写 descriptor + 原型标记），因为本包没有构建步骤、
   产不出 `dsh-typert-generator` 的那两份文件。这是 DSH 的内部机制，大版本升级后可能要跟着调；
   调不动时的表现同样是按钮消失，而不是搜索坏掉。
+- 明细里的端点是**去掉查询串**的 `scheme://host/path`：Google CSE 把 `key=` 拼在 URL 上，
+  时限报错也会把整条 URL 写进消息，所以报告生成前统一脱敏（`engines.js` 的
+  `publicEndpoint` / `redactUrls`，`smoke.mjs` 有对应断言）。
 - **换引擎不会迁移密钥**。`apiKeyEnv` 留空时引用名跟着主引擎走（`brave` → `BRAVE_API_KEY`），
   所以从 Brave 换到 Tavily 要在表单里另填一个 key；旧的那个仍留在凭证服务里。
 - `engine` 在 schema 里是 `union`，表单上是文本框 + 一排胶囊。填了 union 之外的值**保存会失败**，
@@ -369,13 +425,15 @@ dsh-custom-search/
 ├── client.js         浏览器半侧：插件页的配置表单（三个入口）与「测试连接」按钮
 ├── engines.js        引擎适配表：每个引擎的 build（怎么发请求）+ parse（怎么读响应）
 ├── cordis.patch.yml  组合包 patch：1 行 insert（本插件的行）+ 2 条对既有行的覆盖
-├── package.json      dsh.bundle.patch + dsh.client 声明、icon、locale、files 白名单
+├── package.json      dsh.bundle.patch + dsh.client 声明、peerDependencies、icon、locale、files 白名单
 ├── locale/           面板显示用的中英文标题与描述
 ├── icon.svg
 ├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
-    ├── smoke.mjs        14 项：provider 契约、归一化、去重、兜底、取消、错误码、探针缺省时的降级
-    ├── validate.mjs     48 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、浏览器半侧的契约与渲染、探针两端一致性
+    ├── smoke.mjs        18 项：provider 契约、归一化、去重、兜底、取消、错误码、探针报告与脱敏
+    ├── validate.mjs     53 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、peerDependencies 对账、浏览器半侧的契约与渲染、探针两端一致性
+    ├── degraded-probe.mjs  子进程跑的降级用例：没有 Typert 包时探针缺席但 provider 照常
+    ├── stubs/           只在 dev 里顶替 @deepseek-ai/dsh-typert-protocol（含注册用的 resolve hook）
     ├── bundle-rows.mjs  对着任一份 patch 复现卸载判据（bundle-in-use），非本包的行会标出来
     └── asar.py          从 DSH 安装包里抽源码/依赖的解析脚本
 ```
@@ -403,10 +461,13 @@ dsh plugin --profile desktop add D:\code\self\all\dsh-custom-search
 
 ```bash
 cd dev
-node smoke.mjs      # 起本地 mock server，用 stub ctx.web 驱动真实插件模块
-node validate.mjs   # 清单、patch 方言、两端声明一致性，以及浏览器半侧的契约
+node smoke.mjs      # 起本地 mock server，用 stub ctx.web 驱动真实插件模块（含探针报告与脱敏）
+node validate.mjs   # 清单、patch 方言、两端声明一致性，以及浏览器半侧的契约与渲染
 node bundle-rows.mjs <某份 cordis.patch.yml>   # 复现宿主的卸载判据，定位「卸不掉」
 ```
+
+`degraded-probe.mjs` 不用手动跑——`smoke.mjs` 会用子进程拉它起来（必须另起进程，
+因为 resolve hook 是按进程注册的）。
 
 `validate.mjs` 里浏览器半侧那段最值得一提：它**真的把 `client.js` 跑了两遍**——先在 `vm` 里
 用 stub 的 `require` 物化工厂，拿一份假 `ctx` 调 `apply(ctx)`，检查它到底注册了什么；再拿一份
@@ -422,7 +483,13 @@ node bundle-rows.mjs <某份 cordis.patch.yml>   # 复现宿主的卸载判据�
 不留任何信息**。所以"能不能渲染"必须真的渲染才知道。0.3.1 修的那个 bug（`connectionPanel`
 的签名漏了 `state`，函数体里 `state?.writable` 于是成了未声明标识符——可选链只护 `null`，
 不护未声明变量）正是靠这一遍抓出来的。渲染这遍还覆盖了三条分支：带探针、不带探针、
-以及探针已出报告（检查行 + 来源列表）。
+以及探针已出报告（检查行 + 来源列表 + **逐次尝试明细**）。
+
+最后那条分支的断言值一提：`validate.mjs` 从 `client.js` 里**读出真实的中文模板**当渲染时的
+`t`，再把渲染结果与模板对起来。用恒等函数当 `t` 的话占位符根本不会被填充，明细渲染成
+`key: {ref}` 这种半成品也照样"渲染成功"——那样的断言等于没写。同时它先把函数组件展开一遍
+拿到文本（`textOf`），再渲染一遍（`stageReport` 可重复调用），所以同一份报告会被走两次，
+次数多算一次就会当场露馅。
 
 **探针那几项是同类问题的另一面。** 测试按钮要经 Remote 调用才能碰到宿主，而这个包没有构建步骤，
 `@deepseek-ai/dsh-typert-generator` 本该产出的那两份声明只能手写；**写错命名空间不会报错**，
@@ -430,8 +497,16 @@ node bundle-rows.mjs <某份 cordis.patch.yml>   # 复现宿主的卸载判据�
 `id` / `service` / `namespace` / `method`、每个参数是否带 `strict` codec 标记（`$mount` 唯一的硬要求，
 它不执行 schema）、宿主方法的参数名与 descriptor 的 `wire`（源模式是从函数源码文本里解析参数名的，
 所以不能有默认值、解构或 rest），以及原型标记键是否与 Gateway 读取的那个常量逐字相同。
-`smoke.mjs` 补的是另一半：本机没有 Typert 包，正好是降级场景，断言 `apply` 照常注册 provider
-并返回 disposer，探针缺席不牵连搜索。
+`smoke.mjs` 补的是另一半，而且**两条路都跑真代码**：进程内 `register()` 一个 resolve hook
+（`dev/stubs/hooks.mjs`），只把它一个 specifier 顶替掉，于是 `installProbe` 真的挂载起来，
+探针出报告那一串（HTTP 状态、脱敏端点、往返耗时、每跳成败、密钥来源与引用名）才有东西可断言；
+另一半"压根没有 Typert 包"的降级场景交给子进程 `degraded-probe.mjs`，它不带这个 hook，
+所以 `import()` 失败得和真实部署一样。断言的是：`apply` 照常注册 provider 并返回 disposer，
+`console.warn` 恰好报一次且原因里点名缺失的包——**探针缺席不牵连搜索**。
+
+顶替品做成 `node:module` 的 hook 而不是往 `node_modules/` 里塞个假包，是因为后者会真的遮蔽
+真包（哪天本机装上了 Typert，测试会继续跑在假货上却毫无提示）。hook 只重定向一个 specifier，
+`@deepseek-ai/schemastery` 走的还是真包。
 
 行归属那几项同理：脚本会照 `applyEntryPatches` 的语义把各层合成一遍，断言
 `insert:` 里只有本包自己的行、合成后 `web` / `web-search-deepseek` 各只有一份。

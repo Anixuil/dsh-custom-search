@@ -132,28 +132,33 @@ function clampTimeout(value) {
 }
 
 /**
- * Resolve the credential one search needs.
+ * Resolve the credential one search needs, and say where it came from.
  *
  * Order: the literal `apiKey`, then the credentials service (what the web Models
  * page and the plugin settings form write), then the launching environment, then
  * the process environment. Resolving per call means a rotated key reaches the
  * next search without a restart.
  *
+ * The origin is returned alongside the value because the connectivity probe
+ * reports it: "no key configured" and "a key exists but this deployment never
+ * resolved it" look identical from the outside and need different fixes.
+ *
  * @param literal - a key typed straight into the settings form; wins over a reference.
  * @param refName - the credential reference to resolve when no literal was given.
+ * @returns the value (possibly undefined) and the step that produced it.
  */
 async function resolveApiKey(ctx, engine, { literal, refName }) {
-  if (nonEmpty(literal)) return literal.trim()
+  if (nonEmpty(literal)) return { value: literal.trim(), source: 'literal', ref: undefined }
 
   const reference = nonEmpty(refName) ? refName.trim() : engine.apiKeyEnv
-  if (reference === null || reference === undefined) return undefined
+  if (reference === null || reference === undefined) return { value: undefined, source: 'none', ref: undefined }
 
   try {
     const { credentialRef } = await import('@deepseek-ai/dsh-credentials')
     const credentials = ctx.get('credentials')
     if (credentialRef !== undefined && credentials !== undefined) {
       const resolved = await credentials.resolve(credentialRef(reference))
-      if (nonEmpty(resolved?.value)) return resolved.value
+      if (nonEmpty(resolved?.value)) return { value: resolved.value, source: 'credential', ref: reference }
     }
   } catch {
     /* the composition may not mount the credentials service */
@@ -162,13 +167,14 @@ async function resolveApiKey(ctx, engine, { literal, refName }) {
   try {
     const { launchEnvironmentOf } = await import('@deepseek-ai/dsh-launch-environment')
     const ambient = launchEnvironmentOf(ctx)?.get(reference)
-    if (nonEmpty(ambient?.value)) return ambient.value
+    if (nonEmpty(ambient?.value)) return { value: ambient.value, source: 'launch-environment', ref: reference }
   } catch {
     /* the composition may not mount the launch environment */
   }
 
   const fromProcess = process.env?.[reference]
-  return nonEmpty(fromProcess) ? fromProcess : undefined
+  if (nonEmpty(fromProcess)) return { value: fromProcess, source: 'process-env', ref: reference }
+  return { value: undefined, source: 'none', ref: reference }
 }
 
 /** Ordered, de-duplicated engine chain: the primary first, then configured fallbacks. */
@@ -240,7 +246,20 @@ class CustomSearchProvider {
     return reference !== null && nonEmpty(process.env?.[reference])
   }
 
-  async search(request, signal) {
+  /**
+   * Run the query down the configured engine chain.
+   *
+   * `trace` is not part of the seam's contract — the seam calls this with two
+   * arguments — but the connectivity probe passes one so the settings page can
+   * report what actually happened on the wire. Routing it through here rather
+   * than through a parallel implementation is the point: the probe then
+   * exercises exactly the path the agent uses, fallbacks and all.
+   *
+   * @param request - the seam's request; only `query` is read.
+   * @param signal - the seam's cancellation signal.
+   * @param trace - optional per-attempt observer; see `runEngine`.
+   */
+  async search(request, signal, trace) {
     const options = this.snapshot()
     const chain = buildChain(options)
     if (chain.length === 0) {
@@ -257,15 +276,24 @@ class CustomSearchProvider {
     for (const [index, engineId] of chain.entries()) {
       const engine = ENGINES[engineId]
       const isPrimary = index === 0
+      let credential = {
+        value: undefined,
+        source: engine.keyless === true ? 'not-needed' : 'none',
+        ref: engine.apiKeyEnv,
+      }
+      const forward = typeof trace === 'function'
+        ? (record) => trace({ ...record, credential: { source: credential.source, ref: credential.ref } })
+        : undefined
+
       try {
-        const apiKey = engine.keyless === true
-          ? undefined
-          : await resolveApiKey(this.ctx, engine, {
+        if (engine.keyless !== true) {
+          credential = await resolveApiKey(this.ctx, engine, {
             // A literal key and a credential reference both describe the
             // selected primary engine; a fallback engine resolves its own.
             literal: isPrimary ? options.apiKey : undefined,
             refName: isPrimary ? options.apiKeyEnv : undefined,
           })
+        }
 
         const sources = await runEngine(
           engineId,
@@ -281,8 +309,9 @@ class CustomSearchProvider {
             // engine must not be pointed at another vendor's host. Naming an
             // engine in `endpoints` overrides it for that engine specifically.
             endpointOverride: perEngine[engineId] ?? (isPrimary ? options.endpoint : undefined),
+            trace: forward,
           },
-          apiKey,
+          credential.value,
           signal,
         )
 
@@ -314,22 +343,23 @@ class CustomSearchProvider {
  * those two declarations, so they are written by hand here, and `client.js`
  * carries the matching browser-side descriptor.
  *
- * Two boundaries make this safe to attempt unconditionally: the Typert packages
- * are imported lazily, so a deployment without them keeps the provider; and the
- * probe answers rather than throws, so the page always has something to render.
+ * The Typert packages are imported lazily, so a deployment without them keeps
+ * the provider; the caller is told why the probe is missing instead of it
+ * failing silently, because "the button does nothing" and "the button is not
+ * there" have the same appearance from the settings page.
  *
  * @param ctx - the plugin context; the service unregisters with its fiber.
  * @param provider - the live provider, so a probe exercises the agent's own path.
- * @returns whether the probe was installed.
+ * @returns whether the probe was installed, and the reason when it was not.
  */
 async function installProbe(ctx, provider) {
   let Base
   try {
     ({ TypertRemoteService: Base } = await import('@deepseek-ai/dsh-typert-protocol'))
-  } catch {
-    return false
+  } catch (error) {
+    return { ok: false, reason: `@deepseek-ai/dsh-typert-protocol 无法加载（${describe(error)}）` }
   }
-  if (typeof Base !== 'function') return false
+  if (typeof Base !== 'function') return { ok: false, reason: '@deepseek-ai/dsh-typert-protocol 未导出 TypertRemoteService' }
 
   class CustomSearchProbe extends Base {
     /**
@@ -341,32 +371,48 @@ async function installProbe(ctx, provider) {
 
     /**
      * Run one real search down the configured engine chain and report what
-     * happened — including the failures.
+     * happened — including every attempt's failure.
      *
      * Deliberately not a wrapper that rethrows: the page shows `error` verbatim,
      * and the provider's own message already names every engine it tried and why
      * each one failed, which is exactly what a user debugging a key needs.
      *
      * @param query - text to search for; blank falls back to a fixed probe.
-     * @returns a plain report; every field is lossless JSON.
+     * @returns a plain report; every field is lossless JSON with no key material.
      */
     async test(query) {
       const options = provider.snapshot()
       const text = nonEmpty(query) ? String(query).trim().slice(0, 200) : 'deepseek'
+      const attempts = []
       const started = Date.now()
       const report = {
         query: text,
-        engine: options.engine,
+        engine: options.engine ?? null,
         engineLabel: engineLabel(options.engine),
         chain: buildChain(options).map((id) => engineLabel(id)),
         ok: false,
         count: 0,
         sources: [],
+        attempts,
         elapsedMs: 0,
       }
 
       try {
-        const { sources } = await provider.search({ query: text, maxResults: PROBE_RESULT_LIMIT })
+        const { sources } = await provider.search({ query: text, maxResults: PROBE_RESULT_LIMIT }, undefined, (record) => {
+          attempts.push({
+            engine: record.engine,
+            engineLabel: record.engineLabel,
+            method: record.method ?? null,
+            endpoint: record.endpoint ?? null,
+            status: record.status ?? null,
+            ms: record.ms ?? null,
+            ok: record.ok === true,
+            count: record.count ?? null,
+            error: record.error ?? null,
+            credential: record.credential?.source ?? null,
+            ref: record.credential?.ref ?? null,
+          })
+        })
         report.count = sources.length
         report.ok = sources.length > 0
         report.sources = sources.slice(0, PROBE_RESULT_LIMIT).map((source) => ({
@@ -390,7 +436,7 @@ async function installProbe(ctx, provider) {
   // Constructing a Service registers it on the calling fiber, so the probe
   // disappears with the plugin.
   new CustomSearchProbe(ctx)
-  return true
+  return { ok: true }
 }
 
 export function apply(ctx, config) {
@@ -412,8 +458,15 @@ export function apply(ctx, config) {
   const provider = new CustomSearchProvider(ctx, snapshot)
 
   // Optional, and never allowed to break the provider: a refused probe costs the
-  // settings page its connectivity button and nothing else.
-  void installProbe(ctx, provider).catch(() => {})
+  // settings page its connectivity button and nothing else. A Host half has no
+  // channel to a slot, so a maintainer reads the reason here; the page shows its
+  // own "no probe" line in place of the button's result.
+  void installProbe(ctx, provider).then(
+    (result) => {
+      if (result.ok !== true) console.warn(`[dsh-custom-search] 连接探针未安装：${result.reason}，配置页只显示本地检查。`)
+    },
+    (error) => console.warn(`[dsh-custom-search] 连接探针未安装：${describe(error)}，配置页只显示本地检查。`),
+  )
 
   // Registered with the calling fiber, so the provider unregisters on dispose.
   return ctx.web.registerSearchProvider(provider)

@@ -220,6 +220,43 @@ ok(`密文字段不进 patch：${[...secrets].join(', ')}`)
 Config(pluginRow.config)
 ok('patch 的配置能通过 Config 校验')
 
+// --- host-half imports vs. the manifest's peerDependencies ----------------
+// A bundle installed into a profile resolves `@deepseek-ai/*` from the running
+// dsh installation — but only through the resolver dsh-app-boot installs, and
+// only for names the manifest declares. An undeclared one is not "optional": it
+// is unresolvable, and the consequence is invisible from the UI. The plugin
+// loads, the provider works, and exactly the feature behind that import is
+// missing. That is how the connectivity probe shipped broken once already:
+// `@deepseek-ai/dsh-typert-protocol` resolved nowhere, `installProbe` bowed out
+// silently, and the settings page simply said the Host had no probe.
+const hostSources = [['index.js', read('index.js')], ['engines.js', read('engines.js')]]
+const imported = new Set()
+for (const [, source] of hostSources) {
+  for (const match of source.matchAll(/(?:import\s*\(\s*|from\s+)['"](@deepseek-ai\/[^'"]+)['"]/gu)) imported.add(match[1])
+}
+assert.ok(imported.size >= 4, `应至少导入 4 个 @deepseek-ai 包，实际找到 ${imported.size} 个`)
+const peers = new Set(Object.keys(pkg.peerDependencies ?? {}))
+const undeclared = [...imported].filter((name) => !peers.has(name)).sort()
+assert.deepEqual(
+  undeclared,
+  [],
+  `宿主半侧导入了却没声明 peerDependencies 的包（运行时解析不到，功能会静默缺失）：${undeclared.join(', ')}`,
+)
+ok(`宿主半侧导入的 ${imported.size} 个 @deepseek-ai 包全部声明为 peerDependencies`)
+
+// A peer the code no longer imports is a promise the manifest does not keep.
+const stalePeers = [...peers].filter((name) => !imported.has(name)).sort()
+assert.deepEqual(stalePeers, [], `peerDependencies 里有代码不再导入的条目：${stalePeers.join(', ')}`)
+ok('peerDependencies 没有过期条目')
+
+// `*` is deliberate: dsh-app-boot evaluates @deepseek-ai/dsh-* peers against the
+// running version, so any pinned range turns the next Harness upgrade into a
+// refused installation that needs an exact-version exemption.
+for (const [name, range] of Object.entries(pkg.peerDependencies ?? {})) {
+  assert.equal(range, '*', `${name} 的 peer 范围应为 *，否则升级 dsh 后会被兼容性检查拦下`)
+}
+ok('peer 范围全为 *：升级 dsh 后不会被兼容性检查拦下')
+
 // --- browser half ---------------------------------------------------------
 // A plugin's settings page is NOT derived from its Config schema: the Plugins
 // page only renders a page some browser half registered. These checks cover the
@@ -375,6 +412,45 @@ const expand = (node, seen = []) => {
 
 /** Readable name for an element type, for assertions and messages. */
 const typeName = (type) => (typeof type === 'string' ? type : type?.name || '(anonymous)')
+
+/**
+ * Resolve a dictionary key to the Chinese template the plugin ships.
+ *
+ * Identity `t` proves a tree rendered; it cannot prove what the page *says*,
+ * because every placeholder stays unfilled. This reads the real template out of
+ * `client.js`, so a rendered line can be compared with the sentence a user sees.
+ * @param key - the dictionary key the component asked for.
+ * @returns the template, or the key when it is missing.
+ */
+const zhTemplate = (key) => {
+  const match = new RegExp(`^\\s+${key}: '((?:[^'\\\\]|\\\\.)*)',`, 'mu').exec(clientSrc)
+  return match === undefined ? key : match[1].replace(/\\'/gu, "'")
+}
+
+/**
+ * Collect every string a tree renders.
+ *
+ * `expand` proves a tree renders; this reads what it says. The connectivity
+ * report is the plugin's only user-facing evidence about the outside world, so
+ * "it rendered" is not the property worth asserting — the details are.
+ * @param node - the element, array, or leaf.
+ * @param out - accumulator of text fragments.
+ * @returns the fragments in render order.
+ */
+const textOf = (node, out = []) => {
+  if (Array.isArray(node)) {
+    for (const child of node) textOf(child, out)
+    return out
+  }
+  if (typeof node === 'string') {
+    out.push(node)
+    return out
+  }
+  if (node === null || node === undefined || typeof node !== 'object' || node[ELEMENT] !== true) return out
+  if (typeof node.type === 'function') textOf(node.type(node.props), out)
+  else textOf(node.props?.children, out)
+  return out
+}
 
 const uiStub = {
   settingsTextField: (name) => ({ kind: 'text', name }),
@@ -575,30 +651,78 @@ assert.equal(
 ok('summary 视图只返回一行文案')
 
 // A settled probe report, so the branches that only render once something has
-// run — the check lines and the source list — execute too.
-pendingState.push(
-  {
-    local: [
-      { level: 'ok', key: 'chkEngineOk', vars: { v: 'Brave Search' } },
-      { level: 'bad', key: 'chkKeyMissing', vars: { v: 'BRAVE_API_KEY' } },
+// run — the check lines, the per-attempt detail and the source list — execute
+// too. The detail rows are the whole point of the report: a bare "failed" tells
+// a user nothing they can act on, while the status code, the host and the
+// credential origin separate a bad key from a wrong endpoint from a key that was
+// never resolved.
+// Staging is a function because the stub re-invokes function components on every
+// traversal: `expand` and `textOf` each render the tree once, so both need the
+// report armed before they run.
+const reportedReport = {
+  local: [
+    { level: 'ok', key: 'chkEngineOk', vars: { v: 'Brave Search' } },
+    { level: 'bad', key: 'chkKeyMissing', vars: { v: 'BRAVE_API_KEY' } },
+  ],
+  dirty: true,
+  remote: {
+    status: 'ok',
+    count: 2,
+    elapsedMs: 12,
+    engineLabel: 'Brave Search',
+    attempts: [
+      {
+        engine: 'brave',
+        engineLabel: 'Brave Search',
+        method: 'GET',
+        endpoint: 'https://api.example.test/res/v1/web/search',
+        status: 200,
+        ms: 12,
+        ok: true,
+        count: 2,
+        credential: 'credential',
+        ref: 'BRAVE_API_KEY',
+      },
     ],
-    dirty: true,
-    remote: {
-      status: 'ok',
-      count: 2,
-      elapsedMs: 12,
-      engineLabel: 'Brave Search',
-      sources: [{ title: 'Alpha', url: 'https://example.test/a' }],
-    },
+    sources: [{ title: 'Alpha', url: 'https://example.test/a' }],
   },
-  false,
-)
+}
+const stageReport = () => pendingState.push(reportedReport, false)
+
 let reportedTypes
+let reportedText
 assert.doesNotThrow(() => {
-  reportedTypes = expand(Card(pageProps)).map(typeName)
+  stageReport()
+  const tree = Card({ ...pageProps, t: zhTemplate })
+  reportedTypes = expand(tree).map(typeName)
+  stageReport()
+  reportedText = textOf(tree).join(' | ')
 }, '带探针报告时 page 视图渲染抛错')
 assert.ok(reportedTypes.includes('Button'), '带报告的连接面板应仍渲染按钮')
-ok('带探针报告时 page 视图渲染成功（检查行 + 来源列表）')
+ok('带探针报告时 page 视图渲染成功（检查行 + 请求明细 + 来源列表）')
+
+// The details actually reach the page: the status line, the host, and where the
+// key came from — with placeholders filled, so this is the sentence a user reads.
+assert.match(reportedText, /HTTP 200 · 12 ms/u, '报告必须写出状态码与往返耗时')
+assert.match(reportedText, /GET https:\/\/api\.example\.test\/res\/v1\/web\/search/u, '报告必须写出方法与脱敏端点')
+assert.match(reportedText, /密钥来源：凭据服务（BRAVE_API_KEY）/u, '报告必须写出密钥来源与引用名')
+ok('报告明细（状态码 / 方法 / 端点 / 密钥来源）真的渲染出来了')
+
+// Every credential origin the Host can report must have a dictionary entry;
+// a missing one drops the line silently, and that line is the fix instruction.
+// Keys are read in both spellings: an identifier-shaped one is unquoted, the
+// hyphenated ones cannot be.
+const keySourceBlock = clientSrc.slice(
+  clientSrc.indexOf('const KEY_SOURCE_OF'),
+  clientSrc.indexOf('}', clientSrc.indexOf('const KEY_SOURCE_OF')),
+)
+const clientKeySources = [...keySourceBlock.matchAll(/^\s*'?([a-z-]+)'?:/gmu)].map((match) => match[1])
+const hostKeySources = ['literal', 'credential', 'launch-environment', 'process-env', 'none', 'not-needed']
+for (const source of hostKeySources) {
+  assert.ok(clientKeySources.includes(source), `客户端 KEY_SOURCE_OF 缺少宿主会报的来源 "${source}"`)
+  assert.ok(read('index.js').includes(`'${source}'`), `index.js 里找不到来源字面量 "${source}"：两半已经说不到一起了`)
+}
+ok(`密钥来源两端一致（${hostKeySources.length} 种）`)
 
 // A registration that injected no probe still renders — as a plain form.
 const bareProps = { ...pageProps }
