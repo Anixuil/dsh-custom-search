@@ -101,6 +101,42 @@ window.__ModuleLoader__.load({
     const PROBE_METHOD = 'test'
 
     /**
+     * The boundary schema a strict codec must be able to produce.
+     *
+     * This endpoint's boundary is JSON and nothing more: the Host synthesizes an
+     * SRC parameter as `{ mode: 'src-json' }`, and its `decode()` only consults a
+     * codec at all for strict ones. So the honest factory is a JSON passthrough.
+     */
+    const SRC_BOUNDARY_SCHEMA = { parse: (value) => value }
+
+    /**
+     * A strict codec, complete enough for every validator on the way in.
+     *
+     * Three separate validators read a descriptor, and they do NOT agree on how
+     * much of a codec has to be there:
+     *
+     *   - the Gateway's `requireStrictInputs` looks only at `mode`;
+     *   - the Client registry's `validateInvocation`/`validateCodec` — reached by
+     *     the same `$mount`, right after the Gateway's check — additionally
+     *     demands a non-empty `typeSymbol` and a `create` function;
+     *   - `dsh-typert-loader`'s `requireStrictCodec` demands the same, plus that
+     *     `decode`/`encode`, if present at all, are functions.
+     *
+     * Falling short of the second one cost us the probe for two releases, and it
+     * reported itself as `Cannot read properties of undefined (reading 'length')`
+     * — `validateNonempty` reading `.length` off the absent `typeSymbol`. Hence
+     * one factory here rather than two hand-written literals.
+     *
+     * @param typeSymbol - the `<package>#<endpoint>:<slot>` name the schema carries.
+     * @returns a codec that satisfies all three validators.
+     */
+    const strictCodec = (typeSymbol) => ({
+      mode: 'strict',
+      typeSymbol,
+      create: () => SRC_BOUNDARY_SCHEMA,
+    })
+
+    /**
      * The Host-for-Client contribution the probe is mounted from.
      *
      * This deployment selects Remote capabilities at build time, so a plugin
@@ -109,22 +145,29 @@ window.__ModuleLoader__.load({
      * declares a Remote marker on its service prototype, and this side hands the
      * Gateway the descriptor describing the same endpoint.
      *
-     * `$mount` validates that every parameter carries a strict codec *marker* —
-     * it never runs the codec, and the call itself sends positional JSON values
-     * keyed by `wire` — so `{ mode: 'strict' }` satisfies it on its own. A
-     * failure here is not fatal: the page falls back to its local checks.
+     * The call itself sends positional JSON values keyed by `wire`; the codecs
+     * exist to satisfy validation, not to transform anything. A refused mount is
+     * not fatal — the page falls back to its local checks and says which
+     * validator refused it.
      */
     const PROBE_CONTRIBUTION = {
-      package: 'dsh-custom-search',
+      package: PKG_NAME,
       descriptors: [
         {
-          id: `dsh-custom-search#${PROBE_NAMESPACE}/${PROBE_METHOD}`,
+          id: `${PKG_NAME}#${PROBE_NAMESPACE}/${PROBE_METHOD}`,
           service: PROBE_NAMESPACE,
           namespace: PROBE_NAMESPACE,
           method: PROBE_METHOD,
           invocation: { kind: 'direct' },
-          parameters: [{ name: 'query', wire: 'query', source: 'json', codec: { mode: 'strict' } }],
-          result: { mode: 'strict' },
+          parameters: [
+            {
+              name: 'query',
+              wire: 'query',
+              source: 'json',
+              codec: strictCodec(`${PKG_NAME}#${PROBE_NAMESPACE}/${PROBE_METHOD}:parameter:query`),
+            },
+          ],
+          result: strictCodec(`${PKG_NAME}#${PROBE_NAMESPACE}/${PROBE_METHOD}:result`),
         },
       ],
     }

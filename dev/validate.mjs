@@ -931,15 +931,53 @@ assert.equal(
   'descriptor.id 必须形如 <包名>#<命名空间>/<方法>',
 )
 
-// `$mount` refuses the whole contribution when a parameter lacks a strict codec
-// marker. It never runs that codec — the call sends positional JSON keyed by
-// `wire` — so the marker is the entire contract.
+// Three validators read this descriptor on the way in, and they disagree about
+// how much of a codec must be present. Asserting only what the first one wants
+// is how the probe stayed unmounted for two releases: `$mount`'s own
+// `requireStrictInputs` looks at `mode` and nothing else, then the Client
+// registry's `validateInvocation` — reachable only *through* that same `$mount`
+// — demanded a `typeSymbol` and a `create` factory too, and refused the mount
+// with `Cannot read properties of undefined (reading 'length')` from
+// `validateNonempty` reading `.length` off the absent symbol.
+//
+// The requirements below are transcribed from the shipped code:
+//   dsh-api-gateway/src/client/index.ts  requireStrictInputs / requireStrictCodec
+//   dsh-typert-registry/lib/client.js    validateInvocation / validateCodec
+//   dsh-typert-loader/lib/index.js       requireStrictCodec
+// A change in any of them has to be reflected here, which is the point: the
+// runtime error names no field, so this is the only place that can.
+const assertStrictCodec = (codec, subject) => {
+  assert.equal(codec?.mode, 'strict', `${subject} 必须是 strict codec`)
+  assert.equal(typeof codec.typeSymbol, 'string', `${subject} 缺 typeSymbol（注册表会读它的 .length）`)
+  assert.ok(codec.typeSymbol.length > 0, `${subject} 的 typeSymbol 不能为空`)
+  assert.equal(typeof codec.create, 'function', `${subject} 缺 create 工厂`)
+  for (const method of ['decode', 'encode']) {
+    if (codec[method] !== undefined) assert.equal(typeof codec[method], 'function', `${subject}.${method} 要么不写，要么是函数`)
+  }
+  // The Host's `decode()` really does run `codec.create().parse(value)` for a
+  // strict codec, so a factory that returns nothing is only safe while the SRC
+  // path keeps handing it a src-json parameter. Assert the shape it would need.
+  const schema = codec.create()
+  assert.equal(typeof schema?.parse, 'function', `${subject} 的 create() 必须产出带 parse 的 schema`)
+  assert.equal(schema.parse('probe'), 'probe', `${subject} 的 schema 必须原样放行 JSON`)
+}
+
 assert.equal(probeDescriptor.parameters?.length, 1, '探针有一个业务参数：搜索词')
 const probeParameter = probeDescriptor.parameters[0]
-assert.equal(probeParameter.codec?.mode, 'strict', '$mount 要求每个参数都带 strict codec 标记')
+assertStrictCodec(probeParameter.codec, '探针参数的 codec')
 assert.equal(probeParameter.source, 'json', '搜索词按位置传 JSON，source 必须是 json')
 assert.equal(probeParameter.wire, probeParameter.name, 'wire 与 name 相同：源模式按名字装 args')
-ok('探针 descriptor 满足 $mount 的形状要求（直达 / strict codec / id 形式）')
+assertStrictCodec(probeDescriptor.result, '探针结果的 codec')
+
+// The host side has to agree, or the synthesized descriptor sends an argument
+// the method does not take. Method names are parsed from source text, so this is
+// the one place the two halves can be compared before a live call.
+assert.equal(
+  probeDescriptor.parameters.map((parameter) => parameter.name).join(','),
+  'query',
+  'descriptor 的参数名必须与宿主方法 async test(query) 一致',
+)
+ok('探针 descriptor 满足 $mount 的三套校验（直达 / 完整 strict codec / id 形式）')
 
 // The wire name must equal the Host method's own parameter name: source-mode
 // discovery derives the parameter list from that function's source text, and
