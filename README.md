@@ -265,21 +265,34 @@ dsh plugin --profile desktop remove dsh-custom-search
 而它们的正本属于 `dsh-base`，永远不会下线，卸载检查因此永远过不去（见「安装后的实际改动」）。
 0.2.0 起改成顶层覆盖，面板卸载正常。
 
-已经装成旧版、被卡住的，手工摘掉即可（桌面端没有 `dsh` CLI，只能改文件）：
+**已经被卡住的旧版：不用拆 profile，换掉那一份文件就够。** 卸载检查读的是
+**已安装副本**里的 `cordis.patch.yml`，把它换成 0.2.0 的，判据立刻从 3 行降到 1 行：
 
 ```bash
-# 1) 停掉 Harness（或接受重启后生效）
+cd ~/.dsh/profiles/desktop/node_modules/dsh-custom-search
+cp "D:\code\self\all\dsh-custom-search\cordis.patch.yml" .
+# 然后回面板点卸载 —— 它会自己跑 pnpm remove 并整理 package.json / lockfile
+```
+
+想先确认再动手，用 `dev/bundle-rows.mjs` 对着这份文件跑一次：它照宿主的语义算出
+「贡献行」，凡不是本包的行都会被标出来 —— 那正是 `bundle-in-use` 的判据。
+
+如果报的是**另一个**码 —— `reasonStopProfile`（「这个 profile 没有启用 HMR，
+正在使用的包要停止后用 dsh plugin 卸载」）—— 说明该组合包是**本次启动时**加载的。
+先重启 Harness 让 `startedBundles` 复位，再卸载。
+
+两条路都不通时的兜底（桌面端没有 `dsh` CLI，只能改文件）：
+
+```bash
+# 1) 停掉 Harness
 # 2) 从依赖里删掉这一行
 #    ~/.dsh/profiles/desktop/package.json       的 dependencies.dsh-custom-search
 # 3) 删掉 profile patch 里 id: custom-search 那个条目（若有）
 #    ~/.dsh/profiles/desktop/cordis.patch.yml
-# 4) 删目录（pnpm 会自己整理 lockfile）
+# 4) 删目录，并删掉 dsh.profile.bundles 里的 dsh-custom-search
 rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-custom-search
-# 5) 重启 Harness
+# 5) 重启 Harness —— 官方搜索自动回来
 ```
-
-`dsh.profile.bundles` 里如果还留着 `dsh-custom-search`，一并删掉。
-官方搜索在重启后自动回来。
 
 ## 安全说明
 
@@ -318,9 +331,10 @@ dsh-custom-search/
 ├── icon.svg
 ├── docs/             README 用的安装截图
 └── dev/              离线验证套件（不随插件分发，files 白名单已排除）
-    ├── smoke.mjs     13 项：provider 契约、归一化、去重、兜底、取消、错误码
-    ├── validate.mjs  31 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、浏览器半侧契约
-    └── asar.py       从 DSH 安装包里抽源码/依赖的解析脚本
+    ├── smoke.mjs        13 项：provider 契约、归一化、去重、兜底、取消、错误码
+    ├── validate.mjs     31 项：清单、patch 方言、行归属（insert / 覆盖）、patch 与 Config 对齐、浏览器半侧契约
+    ├── bundle-rows.mjs  对着任一份 patch 复现卸载判据（bundle-in-use），非本包的行会标出来
+    └── asar.py          从 DSH 安装包里抽源码/依赖的解析脚本
 ```
 
 ## 开发
@@ -348,6 +362,7 @@ dsh plugin --profile desktop add D:\code\self\all\dsh-custom-search
 cd dev
 node smoke.mjs      # 起本地 mock server，用 stub ctx.web 驱动真实插件模块
 node validate.mjs   # 清单、patch 方言、patch 与 Config 对齐，以及浏览器半侧的契约
+node bundle-rows.mjs <某份 cordis.patch.yml>   # 复现宿主的卸载判据，定位「卸不掉」
 ```
 
 `validate.mjs` 里浏览器半侧那几项值得一提：factory id、`plugins.row.config` 的 key、
@@ -357,8 +372,10 @@ node validate.mjs   # 清单、patch 方言、patch 与 Config 对齐，以及�
 行归属那几项同理：脚本会照 `applyEntryPatches` 的语义把各层合成一遍，断言
 `insert:` 里只有本包自己的行、合成后 `web` / `web-search-deepseek` 各只有一份。
 把覆盖行误写进 `insert:` 时，运行期只表现为「卸载按钮报错」，这里会当场失败。
+`bundle-rows.mjs` 是这条断言的**现场版**：同一套语义，但可以指向任意一份 patch ——
+包括 profile 里那份已安装的副本，所以线上被卡住时也能直接查，不必先复现安装。
 
-两个脚本需要 `js-yaml`、`@deepseek-ai/schemastery`、`@deepseek-ai/cosmokit`
+这些脚本需要 `js-yaml`、`@deepseek-ai/schemastery`、`@deepseek-ai/cosmokit`
 （已放在本目录的 `node_modules/`，被 `.gitignore` 忽略）。
 `@deepseek-ai/*` 那几个是 DSH 自带的 vendor 包，可从本机安装里抽：
 
